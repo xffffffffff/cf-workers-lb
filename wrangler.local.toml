@@ -1,0 +1,22 @@
+name = "worker-lb-local"
+main = "workers/control/index.ts"
+compatibility_date = "2026-09-15"
+
+[assets]
+directory = "./dist"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+run_worker_first = true
+
+[[d1_databases]]
+binding = "DB"
+database_name = "worker-lb-local"
+database_id = "00000000-0000-0000-0000-000000000001"
+migrations_dir = "migrations"
+
+[[kv_namespaces]]
+binding = "CONFIG_KV"
+id = "00000000000000000000000000000001"
+
+[vars]
+ENVIRONMENT = "development"

@@ -1,0 +1,7 @@
+dist/
+node_modules/
+.wrangler/
+.wrangler.generated.*.toml
+.wrangler.generated.secrets
+.dev.vars
+.DS_Store

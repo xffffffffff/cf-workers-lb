@@ -1,0 +1,124 @@
+# Worker LB
+
+Worker LB 是部署在 Cloudflare Workers 上的自托管 HTTP/HTTPS 负载平衡器。它包含 BoardUI 风格的 WebUI、独立管理 API、主动健康检查和边缘流量 Worker，使用 D1 保存配置与历史、KV 保存已发布的热配置快照。
+
+> 这不是 Cloudflare 官方 Load Balancing 产品，也不使用其付费模板源码。它适合希望自行承担运维与免费额度约束的站点。
+
+## 一行安装
+
+在项目目录运行（把主机名改成你自己的 4 个域名）：
+
+```bash
+./install.sh --routes www.example.com,api.example.com,shop.example.net,admin.example.net
+```
+
+脚本会自动检查 Node.js/npm/Wrangler 登录、构建项目、创建 D1 和 KV、执行 migrations、部署三个 Worker、配置每分钟 Cron 和精确主机名 Routes，并生成管理令牌与会话保持密钥。
+
+也可使用 Cloudflare API Token 非交互安装：
+
+```bash
+CLOUDFLARE_API_TOKEN=你的令牌 ./install.sh --yes --routes www.example.com,api.example.com
+```
+
+若已配置 Cloudflare Access：
+
+```bash
+./install.sh --routes www.example.com,api.example.com --access-team-domain team.cloudflareaccess.com --access-aud YOUR_ACCESS_AUD
+```
+
+安装结束会显示管理 Worker URL和一次性的管理令牌。未使用 Access 时，在 WebUI 首次打开的连接窗口输入令牌。令牌只保存在当前标签的 `sessionStorage`。本地生成的资源 ID、令牌和密钥文件均已加入 `.gitignore`；请像密码一样保护 `.wrangler.generated.secrets`。
+
+重复运行安装命令会复用已经创建的 D1/KV 和密钥，不会重复创建资源。
+
+## 首次配置顺序
+
+1. 在“源站”添加两台 VPS，优先使用专用源站主机名。
+2. 创建 HTTPS/HTTP/TCP 监视器。
+3. 创建池并选择源站、监视器。
+4. 等待 Cron 至少完成两次健康检查。
+5. 创建负载平衡器，其主机名必须与安装时的 Worker Route 对应。
+6. 点击“发布配置”。健康源站数不足时，系统会阻止发布。
+
+源站主机名不能命中 Traffic Worker Route，否则会产生回环。安装脚本只为 `--routes` 中列出的公开负载平衡主机名创建精确 Route。HTTPS 源站使用 IP 时必须具有与 IP 匹配的有效证书；实际部署更推荐 `origin.example.com` 形式的专用 DNS 名称。
+
+## 架构
+
+- `workers/traffic`：只读取 KV 活动快照；按健康状态、池优先级、权重、延迟或距离选择源站。支持签名 Cookie 会话保持。GET/HEAD 遇到连接错误或 500/502/503/504 时最多重试另一个源站一次；POST 等非幂等请求不重试。
+- `workers/control`：托管 WebUI 和 `/api/*`，负责资源 CRUD、依赖保护、监视器测试、发布、配置历史和回滚 API。支持 Cloudflare Access JWT 或管理 Bearer token。
+- `workers/health`：每分钟由 Cron 唤醒，只执行到期检查。同一源站和监视器组合只探测一次，再更新关联池。默认连续失败 2 次 Down、连续成功 2 次恢复。
+- D1：草稿配置、关系、健康状态/历史、事件日志和配置版本。
+- KV：唯一的活动配置快照。Traffic Worker 使用最多 5 秒 isolate 内存缓存；KV 的全球最终一致性仍可能带来额外传播延迟。
+
+Traffic Worker 启用 `passThroughOnException()`：读取活动配置发生未处理异常时，Worker Route 会回退到该 DNS 记录原本指向的源站。请让公开主机名 DNS 记录指向可接受的保底 VPS。
+
+正常请求默认只向 D1 采样 1%，故仪表台请求数是采样估算值；故障转移和 5xx 会强制记录。这样可以显著减少免费额度下的 D1 写入量。可在生成的 traffic Wrangler 配置中调整 `REQUEST_LOG_SAMPLE_RATE`。
+
+## 删除安全
+
+负载平衡器、监视器、池和源站均可在 WebUI 删除，删除前会二次确认。依赖关系采用外键及 API 双重保护：
+
+- 源站仍属于某个池时不可删除。
+- 监视器仍被池使用时不可删除。
+- 池仍被负载平衡器使用时不可删除。
+
+应按“负载平衡器 → 池 → 监视器/源站”的顺序删除。删除只改变 D1 草稿；重新发布前，KV 中的线上活动配置保持不变。
+
+## 本地开发
+
+```bash
+npm install
+npm run build
+npm run db:local:migrate
+npm run dev:cloudflare
+```
+
+Wrangler 默认打开 `http://localhost:8787`。本地配置将 `ENVIRONMENT` 设置为 `development`，仅本地模式跳过管理鉴权。
+
+另有纯前端演示模式：
+
+```bash
+npm run dev
+```
+
+当 `/api/state` 不可用时，WebUI 自动使用演示数据。刷新会重置演示状态。
+
+## 验证
+
+在本地 Worker 运行时启动后执行：
+
+```bash
+npm run test:api
+```
+
+测试覆盖资源创建、状态读取、依赖删除拦截、发布健康校验以及按正确顺序删除。完整静态验证：
+
+```bash
+npm run check
+npm run build
+bash -n install.sh scripts/install.sh
+```
+
+## 免费额度注意事项
+
+- Workers 免费请求额度由账号下这些 Worker 合计使用，并非每个域名单独计算。安装前请以 Cloudflare 当前套餐页面显示的额度为准。
+- D1、KV、Cron、子请求和 CPU 也分别受当前套餐限制；高流量、严格 SLA 或多地域独立探针不适合只依赖免费计划。
+- Cron 在 Cloudflare 单一调度环境发起检查，不能完全复现官方 Load Balancer 的多地域健康探针。
+- KV 是最终一致的。请求时被动重试用于覆盖健康状态传播窗口，但不会重试非幂等请求。
+
+## 开源许可
+
+本项目基于 [MIT License](./LICENSE) 开源。
+
+## 目录
+
+```text
+migrations/             D1 schema
+scripts/install.sh      Cloudflare 自动安装器
+src/                    React WebUI
+tests/api-e2e.mjs       管理 API 集成测试
+workers/control/        管理 API + 静态 UI
+workers/health/         Cron 主动健康检查
+workers/shared/         共享模型、探测器、快照构建
+workers/traffic/        请求路径负载平衡
+wrangler.local.toml     本地开发配置
+```

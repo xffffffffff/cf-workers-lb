@@ -1,0 +1,39 @@
+{
+  "name": "worker-lb-control-plane",
+  "private": true,
+  "version": "0.1.0",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "dev:cloudflare": "wrangler dev --config wrangler.local.toml",
+    "dev:health": "wrangler dev --config wrangler.health.local.toml",
+    "dev:traffic": "wrangler dev --config wrangler.traffic.local.toml",
+    "db:local:migrate": "wrangler d1 migrations apply worker-lb-local --local --config wrangler.local.toml",
+    "test:api": "node tests/api-e2e.mjs",
+    "test:full": "node tests/full-e2e.mjs",
+    "build": "tsc -b && vite build",
+    "check": "tsc -b && tsc -p tsconfig.worker.json --noEmit",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@base-ui/react": "latest",
+    "@fontsource-variable/inter": "latest",
+    "class-variance-authority": "latest",
+    "clsx": "latest",
+    "react": "latest",
+    "react-dom": "latest",
+    "recharts": "latest",
+    "sonner": "latest",
+    "zustand": "latest"
+  },
+  "devDependencies": {
+    "@types/react": "latest",
+    "@types/react-dom": "latest",
+    "@cloudflare/workers-types": "latest",
+    "@vitejs/plugin-react": "latest",
+    "typescript": "latest",
+    "vite": "latest",
+    "wrangler": "latest"
+  }
+}
