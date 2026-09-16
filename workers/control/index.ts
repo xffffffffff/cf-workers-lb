@@ -31,6 +31,7 @@ interface Env {
   ACCESS_AUD?: string
   TOKEN_ENCRYPTION_KEY?: string
   WORKER_NAME?: string
+  ADMIN_HOSTS?: string
 }
 
 type JsonObject = Record<string, unknown>
@@ -295,6 +296,8 @@ async function createLoadBalancer(request: Request, env: Env) {
   const body = await readJson(request)
   const id = createId('lb')
   const hostname = normalizeHostname(body.hostname)
+  const adminHosts = String(env.ADMIN_HOSTS ?? '').split(',').map((item) => item.trim().toLowerCase()).filter(Boolean)
+  if (adminHosts.includes(hostname)) throw new Error('管理界面域名不能同时作为负载平衡业务域名')
   const pools = stringArray(body.pools, '池')
   const fallback = await env.DB.prepare(`
     SELECT o.address

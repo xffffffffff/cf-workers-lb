@@ -8,6 +8,7 @@ PREFIX="worker-lb"
 ACCESS_TEAM_DOMAIN=""
 ACCESS_AUD=""
 ADMIN_HOST=""
+CLEAR_ADMIN_HOST=0
 
 usage() {
   cat <<'USAGE'
@@ -18,13 +19,15 @@ Usage:
 
 Options:
   --name PREFIX                 Worker/resource name prefix (default: worker-lb)
-  --admin-host HOSTNAME        Optional custom hostname that may serve the WebUI/API
+  --admin-host HOSTNAME        Create and bind a Worker Custom Domain for the WebUI/API
+  --no-admin-host              Remove a previously configured management Custom Domain
   --access-team-domain DOMAIN  Cloudflare Access team domain, e.g. team.cloudflareaccess.com
   --access-aud AUD             Cloudflare Access application audience tag
   -h, --help                   Show this help
 
-No traffic domain is required during installation. Add Cloudflare API credentials
-and load-balanced hostnames later from the WebUI.
+No traffic domain is required during installation. When --admin-host is set,
+Wrangler creates the management DNS record, certificate, and Worker binding.
+Add load-balanced hostnames later from the WebUI.
 
 The script reuses generated D1, KV, and secret files on subsequent runs.
 USAGE
@@ -34,12 +37,23 @@ while (($#)); do
   case "$1" in
     --name) PREFIX="${2:?Missing value for --name}"; shift 2 ;;
     --admin-host) ADMIN_HOST="${2:?Missing value for --admin-host}"; shift 2 ;;
+    --no-admin-host) CLEAR_ADMIN_HOST=1; shift ;;
     --access-team-domain) ACCESS_TEAM_DOMAIN="${2:?Missing value for --access-team-domain}"; shift 2 ;;
     --access-aud) ACCESS_AUD="${2:?Missing value for --access-aud}"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
 done
+
+if [[ -n "$ADMIN_HOST" && "$CLEAR_ADMIN_HOST" -eq 1 ]]; then
+  echo "--admin-host and --no-admin-host cannot be used together." >&2
+  exit 2
+fi
+
+WORKER_CONFIG=".wrangler.generated.toml"
+if [[ -z "$ADMIN_HOST" && "$CLEAR_ADMIN_HOST" -eq 0 && -f "$WORKER_CONFIG" ]]; then
+  ADMIN_HOST="$(sed -nE 's/^[[:space:]]*ADMIN_HOSTS[[:space:]]*=[[:space:]]*"([^"]*)".*/\1/p' "$WORKER_CONFIG" | head -1)"
+fi
 
 if [[ ! "$PREFIX" =~ ^[a-z0-9][a-z0-9-]{1,40}$ ]]; then
   echo "--name must use lowercase letters, numbers, and hyphens." >&2
@@ -89,7 +103,6 @@ if ! npx wrangler whoami >/dev/null 2>&1; then
 fi
 
 PROVISION_CONFIG=".wrangler.generated.provision.toml"
-WORKER_CONFIG=".wrangler.generated.toml"
 
 if [[ ! -f "$PROVISION_CONFIG" ]]; then
   cat > "$PROVISION_CONFIG" <<EOF
@@ -121,10 +134,19 @@ EOF
 )
 fi
 
+ADMIN_ROUTE=""
+if [[ -n "$ADMIN_HOST" ]]; then
+  ADMIN_ROUTE=$(cat <<EOF
+routes = [{ pattern = "$ADMIN_HOST", custom_domain = true }]
+EOF
+)
+fi
+
 cat > "$WORKER_CONFIG" <<EOF
 name = "$PREFIX"
 main = "workers/unified/index.ts"
 compatibility_date = "2026-09-15"
+$ADMIN_ROUTE
 
 [assets]
 directory = "./dist"
@@ -186,10 +208,24 @@ Worker LB has been deployed as one Worker: $PREFIX
 
 Management token (shown once):
 $ADMIN_TOKEN
+EOF
 
-Open the workers.dev URL printed above. In Settings, add a restricted Cloudflare
-API Token with Zone Read, DNS Edit, and Workers Routes Edit. Domains are then
-added entirely from the WebUI; no --routes argument is required.
+if [[ -n "$ADMIN_HOST" ]]; then
+  cat <<EOF
+Management WebUI: https://$ADMIN_HOST
+Wrangler created the Worker Custom Domain, DNS record, and certificate.
+EOF
+else
+  cat <<EOF
+Management WebUI: open the workers.dev URL printed above.
+To bind a custom management domain, rerun with --admin-host lb.example.com.
+EOF
+fi
+
+cat <<EOF
+
+In Settings, add a restricted Cloudflare API Token with Zone Read, DNS Edit,
+and Workers Routes Edit. Business domains are then added entirely from the WebUI.
 
 Generated config: $WORKER_CONFIG
 Generated secrets: $SECRETS_FILE

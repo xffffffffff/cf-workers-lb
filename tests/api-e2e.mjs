@@ -41,6 +41,12 @@ const pool = await request('/api/pools', {
   body: JSON.stringify({ name: `Test Pool ${suffix}`, description: 'API integration test', monitor: monitor.id, origins: [origin.id] }),
 }, 201)
 
+const adminDomainConflict = await request('/api/load-balancers', {
+  method: 'POST',
+  body: JSON.stringify({ hostname: 'admin.example.com', site: 'Invalid Admin Domain', steering: 'proximity', sessionAffinity: true, pools: [pool.id] }),
+}, 400)
+assert.match(adminDomainConflict.error, /管理界面域名/)
+
 const loadBalancer = await request('/api/load-balancers', {
   method: 'POST',
   body: JSON.stringify({ hostname: `test-${suffix}.example.com`, site: 'Integration Test', steering: 'proximity', sessionAffinity: true, pools: [pool.id] }),

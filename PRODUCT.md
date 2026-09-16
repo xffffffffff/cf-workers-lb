@@ -42,7 +42,7 @@ The product recreates the essential operating model of Cloudflare Load Balancing
 - KV-backed published configuration with a short isolate-memory cache on the traffic path.
 - Cloudflare Access JWT verification with a generated management-token fallback.
 - Dependency-safe deletion for load balancers, pools, monitors, and origins.
-- One-command Wrangler installer for D1, KV, migrations, secrets, assets, and Cron; DNS and exact Worker Routes are managed later from the WebUI.
+- One-command Wrangler installer for D1, KV, migrations, secrets, assets, Cron, and an optional WebUI Custom Domain; business DNS and exact Worker Routes are managed later from the WebUI.
 - AES-GCM encrypted Cloudflare API credentials entered from the WebUI, with no plaintext readback endpoint.
 - Sampled request analytics to keep D1 write usage practical on the free plan.
 

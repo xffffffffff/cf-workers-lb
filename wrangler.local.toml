@@ -24,6 +24,7 @@ id = "00000000000000000000000000000001"
 [vars]
 ENVIRONMENT = "development"
 WORKER_NAME = "worker-lb-local"
+ADMIN_HOSTS = "admin.example.com"
 AFFINITY_SECRET = "local-development-affinity-secret-change-me"
 TOKEN_ENCRYPTION_KEY = "local-development-token-encryption-key-change-me"
 CONFIG_CACHE_SECONDS = "1"

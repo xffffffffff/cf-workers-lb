@@ -6,38 +6,40 @@ Worker LB 是部署在 Cloudflare Workers 上的自托管 HTTP/HTTPS 负载平�
 
 ## 一行安装
 
-从 GitHub 拉取并安装：
+从 GitHub 拉取并安装，同时自动绑定 WebUI 管理域名：
 
 ```bash
-git clone https://github.com/xffffffffff/cf-workers-lb.git && cd cf-workers-lb && ./install.sh
+git clone https://github.com/xffffffffff/cf-workers-lb.git && cd cf-workers-lb && ./install.sh --admin-host lb.example.com
 ```
 
-脚本会自动检查 Node.js/npm/Wrangler 登录、构建项目、创建 D1 和 KV、执行 migrations、部署一个 Worker、配置每分钟 Cron，并生成管理令牌、会话保持密钥和 Token 加密密钥。安装时不需要填写业务域名。
+将 `lb.example.com` 替换为你自己的管理子域名。脚本会通过 Worker Custom Domain 自动创建 DNS、签发证书并绑定 WebUI/API，同时检查 Node.js/npm/Wrangler 登录、构建项目、创建 D1 和 KV、执行 migrations、部署单 Worker、配置每分钟 Cron，并生成管理令牌、会话保持密钥和 Token 加密密钥。安装时不需要填写业务域名。
+
+管理域名必须属于当前 Cloudflare 账号下的活动 Zone，且不应复用已有站点记录。如果不需要自定义管理域名，可省略 `--admin-host` 并使用 Wrangler 输出的 `workers.dev` 地址。管理域名不能再添加为负载平衡业务域名。
 
 也可使用 Cloudflare API Token 非交互安装：
 
 ```bash
-git clone https://github.com/xffffffffff/cf-workers-lb.git && cd cf-workers-lb && CLOUDFLARE_API_TOKEN=部署令牌 ./install.sh
+git clone https://github.com/xffffffffff/cf-workers-lb.git && cd cf-workers-lb && CLOUDFLARE_API_TOKEN=部署令牌 ./install.sh --admin-host lb.example.com
 ```
 
 若已配置 Cloudflare Access：
 
 ```bash
-git clone https://github.com/xffffffffff/cf-workers-lb.git && cd cf-workers-lb && ./install.sh --access-team-domain team.cloudflareaccess.com --access-aud YOUR_ACCESS_AUD
+git clone https://github.com/xffffffffff/cf-workers-lb.git && cd cf-workers-lb && ./install.sh --admin-host lb.example.com --access-team-domain team.cloudflareaccess.com --access-aud YOUR_ACCESS_AUD
 ```
 
-安装结束会显示 Worker URL 和一次性的管理令牌。未使用 Access 时，在 WebUI 首次打开的连接窗口输入管理令牌；它只保存在当前标签的 `sessionStorage`。本地生成的资源 ID、令牌和密钥文件均已加入 `.gitignore`；请像密码一样保护 `.wrangler.generated.secrets`。
+安装结束会显示 WebUI 管理地址和一次性的管理令牌。未使用 Access 时，在 WebUI 首次打开的连接窗口输入管理令牌；它只保存在当前标签的 `sessionStorage`。本地生成的资源 ID、令牌和密钥文件均已加入 `.gitignore`；请像密码一样保护 `.wrangler.generated.secrets`。
 
 首次进入 WebUI 后，在“设置 → Cloudflare API 连接”中获取并填写一个受限 API Token。它需要 `Zone Read`、`DNS Edit`、`Workers Routes Edit` 权限。Token 通过 HTTPS 提交，由安装时生成的 AES-GCM 密钥加密后存入 D1；WebUI 和 API 不会返回明文。
 
 如果已有域名通过 WebUI 接入，系统会阻止清除 Token。请先删除对应负载平衡器，让系统用当前 Token 清理 Worker Route，再清除 Token。
 
-重复运行安装命令会复用已经创建的 D1/KV 和密钥，不会重复创建资源。
+重复运行安装命令会复用已经创建的 D1/KV 和密钥，并自动沿用上次的管理域名。如需更换，再次传入 `--admin-host new.example.com`；如需解除管理 Custom Domain，使用 `--no-admin-host`。
 
 更新已经克隆的项目：
 
 ```bash
-cd cf-workers-lb && git pull --ff-only && ./install.sh
+cd cf-workers-lb && git pull --ff-only && ./install.sh --admin-host lb.example.com
 ```
 
 ## 首次配置顺序
