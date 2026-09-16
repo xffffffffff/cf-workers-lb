@@ -1,14 +1,14 @@
 import { create } from 'zustand'
 import { apiRequest, ApiError, getControlState, setAdminToken, type ControlState } from './api'
-import { seedEndpoints, seedLoadBalancers, seedLogs, seedMonitors, seedPools, trafficData } from './data'
 import type { CloudflareConnection, Endpoint, LoadBalancer, LogEntry, Monitor, Pool, ViewId } from './types'
 
-type BackendState = 'loading' | 'connected' | 'unauthorized' | 'demo'
+type BackendState = 'loading' | 'connected' | 'unauthorized' | 'unavailable'
 export type ResourceKind = 'load-balancers' | 'monitors' | 'pools' | 'origins'
+type Theme = 'light' | 'dark'
 
 interface ControlPlaneState {
   activeView: ViewId
-  theme: 'light' | 'dark'
+  theme: Theme
   sidebarOpen: boolean
   backend: BackendState
   publishedVersion: number | null
@@ -55,35 +55,67 @@ function remotePayload(state: ControlState) {
   }
 }
 
-function eventEntry(event: LogEntry['event'], origin: string, result: string, level: LogEntry['level']): LogEntry {
-  return { id: `log-${Date.now()}`, time: new Date().toLocaleTimeString('zh-CN', { hour12: false }), event, hostname: '全部站点', origin, result, duration: '—', level }
+function initialTheme(): Theme {
+  return document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light'
+}
+
+function applyTheme(theme: Theme) {
+  document.documentElement.dataset.theme = theme
+  document.querySelector('meta[name="theme-color"]')?.setAttribute('content', theme === 'dark' ? '#101113' : '#ffffff')
+  try { localStorage.setItem('worker-lb-theme', theme) } catch { /* Storage may be unavailable in hardened browsers. */ }
+}
+
+function disconnectedState(backend: Extract<BackendState, 'unauthorized' | 'unavailable'>) {
+  return {
+    backend,
+    publishedVersion: null,
+    cloudflare: { configured: false, tokenHint: null, verifiedAt: null },
+    endpoints: [],
+    monitors: [],
+    pools: [],
+    loadBalancers: [],
+    logs: [],
+    traffic: [],
+    failovers: 0,
+  }
+}
+
+function requireConnection(backend: BackendState) {
+  if (backend !== 'connected') throw new Error('无法连接管理控制面，请刷新后重试')
 }
 
 export const useControlPlane = create<ControlPlaneState>((set, get) => ({
   activeView: 'dashboard',
-  theme: 'light',
+  theme: initialTheme(),
   sidebarOpen: false,
   backend: 'loading',
   publishedVersion: null,
   cloudflare: { configured: false, tokenHint: null, verifiedAt: null },
-  endpoints: seedEndpoints,
-  monitors: seedMonitors,
-  pools: seedPools,
-  loadBalancers: seedLoadBalancers,
-  logs: seedLogs,
-  traffic: trafficData,
-  failovers: 7,
+  endpoints: [],
+  monitors: [],
+  pools: [],
+  loadBalancers: [],
+  logs: [],
+  traffic: [],
+  failovers: 0,
   setActiveView: (activeView) => set({ activeView, sidebarOpen: false }),
-  toggleTheme: () => set((state) => ({ theme: state.theme === 'light' ? 'dark' : 'light' })),
+  toggleTheme: () => set((state) => {
+    const theme = state.theme === 'light' ? 'dark' : 'light'
+    applyTheme(theme)
+    return { theme }
+  }),
   setSidebarOpen: (sidebarOpen) => set({ sidebarOpen }),
   hydrate: async () => {
-    try { set(remotePayload(await getControlState())) } catch (error) { set({ backend: error instanceof ApiError && error.status === 401 ? 'unauthorized' : 'demo' }) }
+    set({ backend: 'loading' })
+    try { set(remotePayload(await getControlState())) } catch (error) {
+      set(disconnectedState(error instanceof ApiError && error.status === 401 ? 'unauthorized' : 'unavailable'))
+    }
   },
   connect: async (token) => {
     setAdminToken(token.trim())
     try { set(remotePayload(await getControlState())) } catch (error) {
       setAdminToken('')
-      set({ backend: error instanceof ApiError && error.status === 401 ? 'unauthorized' : 'demo' })
+      set(disconnectedState(error instanceof ApiError && error.status === 401 ? 'unauthorized' : 'unavailable'))
       throw error
     }
   },
@@ -92,79 +124,52 @@ export const useControlPlane = create<ControlPlaneState>((set, get) => ({
     set(remotePayload(await getControlState()))
   },
   publish: async () => {
-    if (get().backend !== 'connected') {
-      await new Promise((resolve) => window.setTimeout(resolve, 650))
-      return 0
-    }
+    requireConnection(get().backend)
     const result = await apiRequest<{ version: number }>('/api/publish', { method: 'POST', body: '{}' })
     await get().refresh()
     return result.version
   },
   addEndpoint: async (endpoint) => {
-    if (get().backend === 'connected') {
-      const [latitude, longitude] = endpoint.coordinates.split(',').map(Number)
-      await apiRequest('/api/origins', { method: 'POST', body: JSON.stringify({ name: endpoint.name, address: endpoint.address, region: endpoint.region, latitude, longitude, weight: endpoint.weight }) })
-      await get().refresh()
-      return
-    }
-    set((state) => ({ endpoints: [endpoint, ...state.endpoints], logs: [eventEntry('CONFIG', endpoint.name, '源站已添加', 'neutral'), ...state.logs] }))
+    requireConnection(get().backend)
+    const [latitude, longitude] = endpoint.coordinates.split(',').map(Number)
+    await apiRequest('/api/origins', { method: 'POST', body: JSON.stringify({ name: endpoint.name, address: endpoint.address, region: endpoint.region, latitude, longitude, weight: endpoint.weight }) })
+    await get().refresh()
   },
   addMonitor: async (monitor) => {
-    if (get().backend === 'connected') {
-      await apiRequest('/api/monitors', { method: 'POST', body: JSON.stringify(monitor) })
-      await get().refresh()
-      return
-    }
-    set((state) => ({ monitors: [monitor, ...state.monitors] }))
+    requireConnection(get().backend)
+    await apiRequest('/api/monitors', { method: 'POST', body: JSON.stringify(monitor) })
+    await get().refresh()
   },
   addPool: async (pool) => {
-    if (get().backend === 'connected') {
-      await apiRequest('/api/pools', { method: 'POST', body: JSON.stringify(pool) })
-      await get().refresh()
-      return
-    }
-    set((state) => ({ pools: [pool, ...state.pools] }))
+    requireConnection(get().backend)
+    await apiRequest('/api/pools', { method: 'POST', body: JSON.stringify(pool) })
+    await get().refresh()
   },
   addLoadBalancer: async (loadBalancer) => {
-    if (get().backend === 'connected') {
-      const steering = { 邻近感知: 'proximity', 动态延迟: 'latency', 随机: 'random', 故障转移: 'failover' }[loadBalancer.steering]
-      await apiRequest('/api/load-balancers', { method: 'POST', body: JSON.stringify({ ...loadBalancer, steering, pools: loadBalancer.pools }) })
-      await get().refresh()
-      return
-    }
-    set((state) => ({ loadBalancers: [loadBalancer, ...state.loadBalancers] }))
+    requireConnection(get().backend)
+    const steering = { 邻近感知: 'proximity', 动态延迟: 'latency', 随机: 'random', 故障转移: 'failover' }[loadBalancer.steering]
+    await apiRequest('/api/load-balancers', { method: 'POST', body: JSON.stringify({ ...loadBalancer, steering, pools: loadBalancer.pools }) })
+    await get().refresh()
   },
   togglePool: async (id) => {
     const pool = get().pools.find((item) => item.id === id)
     if (!pool) return
-    if (get().backend === 'connected') {
-      await apiRequest(`/api/pools/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify({ enabled: !pool.enabled }) })
-      await get().refresh()
-      return
-    }
-    set((state) => ({ pools: state.pools.map((item) => item.id === id ? { ...item, enabled: !item.enabled } : item) }))
+    requireConnection(get().backend)
+    await apiRequest(`/api/pools/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify({ enabled: !pool.enabled }) })
+    await get().refresh()
   },
   toggleEndpointHealth: async (id) => {
     const endpoint = get().endpoints.find((item) => item.id === id)
     if (!endpoint) return
     const nextState = endpoint.state === 'unhealthy' ? 'healthy' : 'unhealthy'
-    if (get().backend === 'connected') {
-      await apiRequest(`/api/origins/${encodeURIComponent(id)}/health`, { method: 'POST', body: JSON.stringify({ state: nextState }) })
-      await get().refresh()
-      return
-    }
-    set((state) => ({
-      endpoints: state.endpoints.map((item) => item.id === id ? { ...item, state: nextState } : item),
-      logs: [eventEntry('HEALTH', endpoint.name, nextState === 'healthy' ? '已恢复' : '已移出', nextState === 'healthy' ? 'success' : 'warning'), ...state.logs],
-    }))
+    requireConnection(get().backend)
+    await apiRequest(`/api/origins/${encodeURIComponent(id)}/health`, { method: 'POST', body: JSON.stringify({ state: nextState }) })
+    await get().refresh()
   },
   testMonitor: async (monitorId) => {
     const origin = get().endpoints.find((item) => item.enabled !== false)
     if (!origin) throw new Error('请先添加一个源站')
-    if (get().backend !== 'connected') {
-      await new Promise((resolve) => window.setTimeout(resolve, 350))
-      return { ok: true, latencyMs: origin.latency }
-    }
+    requireConnection(get().backend)
     return apiRequest('/api/monitors/test', { method: 'POST', body: JSON.stringify({ monitorId, originId: origin.id }) })
   },
   saveCloudflareToken: async (token) => {
@@ -183,19 +188,8 @@ export const useControlPlane = create<ControlPlaneState>((set, get) => ({
     await get().refresh()
   },
   deleteResource: async (kind, id) => {
-    if (get().backend === 'connected') {
-      await apiRequest(`/api/${kind}/${encodeURIComponent(id)}`, { method: 'DELETE' })
-      await get().refresh()
-      return
-    }
-    if (kind === 'origins' && get().pools.some((pool) => pool.origins.includes(id))) throw new Error('该源站仍被池引用，请先从池中移除')
-    if (kind === 'monitors' && get().pools.some((pool) => pool.monitor === id)) throw new Error('该监视器仍被池引用，请先修改或删除相关池')
-    if (kind === 'pools' && get().loadBalancers.some((item) => item.pools.includes(id))) throw new Error('该池仍被负载平衡器引用，请先修改或删除相关负载平衡器')
-    set((state) => ({
-      endpoints: kind === 'origins' ? state.endpoints.filter((item) => item.id !== id) : state.endpoints,
-      monitors: kind === 'monitors' ? state.monitors.filter((item) => item.id !== id) : state.monitors,
-      pools: kind === 'pools' ? state.pools.filter((item) => item.id !== id) : state.pools,
-      loadBalancers: kind === 'load-balancers' ? state.loadBalancers.filter((item) => item.id !== id) : state.loadBalancers,
-    }))
+    requireConnection(get().backend)
+    await apiRequest(`/api/${kind}/${encodeURIComponent(id)}`, { method: 'DELETE' })
+    await get().refresh()
   },
 }))

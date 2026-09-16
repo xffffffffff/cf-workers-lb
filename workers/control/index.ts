@@ -12,7 +12,6 @@ import { buildSnapshot, refreshActiveSnapshotHealth, validateSnapshot, writeActi
 import { probeOrigin } from '../shared/probe'
 import {
   CloudflareApiError,
-  cloudflareCredentialStatus,
   deprovisionHostname,
   provisionHostname,
   removeCloudflareCredential,

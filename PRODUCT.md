@@ -50,12 +50,6 @@ The product recreates the essential operating model of Cloudflare Load Balancing
 
 The administration experience uses BoardUI's public visual language as its design reference: a floating rounded sidebar, quiet neutral surfaces, compact stat cards, direct data tables, one strong blue accent, and restrained status colors. It remains operational, information-dense, and familiar without copying paid template source, reproducing Cloudflare trademarks, or implying that it is an official Cloudflare product.
 
-## Evidence on Hand
-
-- A supplied screenshot of Cloudflare's proximity-steering coordinate interface.
-- Confirmed initial topology: four domains, five sites, two VPS servers.
-- Production traffic samples and real endpoint names are not yet available; prototypes must clearly use synthetic demonstration data.
-
 ## Product Principles
 
 - Keep the request path independent from the management UI.

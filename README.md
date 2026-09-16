@@ -88,15 +88,7 @@ npm run db:local:migrate
 npm run dev:cloudflare
 ```
 
-Wrangler 默认打开 `http://localhost:8787`。本地配置将 `ENVIRONMENT` 设置为 `development`，仅本地模式跳过管理鉴权。
-
-另有纯前端演示模式：
-
-```bash
-npm run dev
-```
-
-当 `/api/state` 不可用时，WebUI 自动使用演示数据。刷新会重置演示状态。
+Wrangler 默认打开 `http://localhost:8787`。本地配置将 `ENVIRONMENT` 设置为 `development`，仅本地模式跳过管理鉴权。`npm run dev` 仅启动 Vite 前端服务，因无 Worker API 而会显示控制面未连接，不会注入假数据。
 
 ## 验证
 

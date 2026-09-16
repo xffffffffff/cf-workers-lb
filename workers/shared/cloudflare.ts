@@ -129,11 +129,6 @@ async function credentialRow(db: D1Database) {
   return db.prepare('SELECT encrypted_token, iv, token_hint, verified_at FROM cloudflare_credentials WHERE id = 1').first<CredentialRow>()
 }
 
-export async function cloudflareCredentialStatus(db: D1Database) {
-  const row = await credentialRow(db)
-  return { configured: Boolean(row), tokenHint: row?.token_hint ?? null, verifiedAt: row?.verified_at ?? null }
-}
-
 export async function saveCloudflareCredential(tokenValue: unknown, env: CloudflareControlEnv) {
   const token = String(tokenValue ?? '').trim()
   if (!/^[A-Za-z0-9_-]{20,256}$/.test(token)) throw new CloudflareApiError('Cloudflare API Token 格式无效')

@@ -17,7 +17,6 @@ import {
   YAxis,
 } from 'recharts'
 import { Toaster, toast } from 'sonner'
-import { requestSplit, trafficData } from './data'
 import { Icon, type IconName } from './icons'
 import { useControlPlane, type ResourceKind } from './store'
 import type { Endpoint, HealthState, LoadBalancer, Monitor, Pool, ViewId } from './types'
@@ -71,11 +70,15 @@ function errorMessage(error: unknown) {
 export function App() {
   const activeView = useControlPlane((state) => state.activeView)
   const theme = useControlPlane((state) => state.theme)
+  const backend = useControlPlane((state) => state.backend)
   const sidebarOpen = useControlPlane((state) => state.sidebarOpen)
   const setSidebarOpen = useControlPlane((state) => state.setSidebarOpen)
   const hydrate = useControlPlane((state) => state.hydrate)
 
   useEffect(() => { void hydrate() }, [hydrate])
+
+  if (backend === 'loading') return <StartupScreen theme={theme} />
+  if (backend === 'unavailable') return <StartupScreen theme={theme} unavailable onRetry={() => { void hydrate() }} />
 
   return (
     <div className="app-shell" data-theme={theme}>
@@ -96,6 +99,17 @@ export function App() {
       </main>
       <Toaster position="bottom-right" theme={theme} mobileOffset={16} />
       <AuthGate />
+    </div>
+  )
+}
+
+function StartupScreen({ theme, unavailable = false, onRetry }: { theme: 'light' | 'dark'; unavailable?: boolean; onRetry?: () => void }) {
+  return (
+    <div className="boot-screen" data-theme={theme} role={unavailable ? 'alert' : 'status'}>
+      <span className="boot-mark">W</span>
+      {unavailable
+        ? <><strong>无法连接管理控制面</strong><p>请通过已部署的 Worker 管理域名打开，或在本地运行 <code>npm run dev:cloudflare</code>。</p><button className={button({ intent: 'secondary' })} type="button" onClick={onRetry}>重新连接</button></>
+        : <><span className="boot-spinner" aria-hidden="true" /><strong>正在连接 Worker LB</strong><span className="sr-only">正在载入</span></>}
     </div>
   )
 }
@@ -139,15 +153,8 @@ function Sidebar() {
       <div>
         <div className="workspace-button">
           <span className="brand-mark">W</span>
-          <span className="workspace-copy"><strong>Worker LB</strong><small>{backend === 'connected' ? 'Cloudflare 已连接' : backend === 'loading' ? '正在连接…' : '本地演示模式'}</small></span>
-          <Icon name="chevron-down" width={16} height={16} />
+          <span className="workspace-copy"><strong>Worker LB</strong><small>{backend === 'connected' ? 'Cloudflare 已连接' : '等待管理认证'}</small></span>
         </div>
-
-        <button className="quick-search" type="button" onClick={() => toast('可在各资源页面使用搜索与筛选')}>
-          <Icon name="search" width={18} height={18} />
-          <span>快速搜索</span>
-          <kbd>⌘K</kbd>
-        </button>
 
         <nav className="nav-list">
           <span className="nav-label">工作区</span>
@@ -183,7 +190,6 @@ function Sidebar() {
         <div className="account-card">
           <span className="account-avatar">A</span>
           <span><strong>管理员</strong><small>Cloudflare 控制面</small></span>
-          <Icon name="chevron-down" width={16} height={16} />
         </div>
         <button className="sidebar-close" type="button" onClick={() => setSidebarOpen(false)} aria-label="关闭导航">
           <Icon name="x" width={20} height={20} />
@@ -197,7 +203,6 @@ function AppHeader() {
   const activeView = useControlPlane((state) => state.activeView)
   const setSidebarOpen = useControlPlane((state) => state.setSidebarOpen)
   const publish = useControlPlane((state) => state.publish)
-  const backend = useControlPlane((state) => state.backend)
   const current = titles[activeView]
 
   return (
@@ -210,25 +215,18 @@ function AppHeader() {
         <h1>{current.title}</h1>
       </div>
       <div className="header-actions">
-        <button className="icon-action notification-button" type="button" aria-label="通知" onClick={() => toast.info('目前没有需要处理的新告警')}>
-          <Icon name="bell" width={19} height={19} />
-          <span>1</span>
-        </button>
-        <button className={button({ intent: 'secondary' })} type="button" onClick={() => toast('筛选已重置')}>
-          <Icon name="filter" width={17} height={17} />筛选
-        </button>
         <button
           className={button({ intent: 'primary' })}
           type="button"
           onClick={() => {
             toast.promise(publish(), {
               loading: '正在验证并发布配置…',
-              success: (version) => version ? `配置 v${version} 已发布到边缘` : '演示配置已发布',
+              success: (version) => `配置 v${version} 已发布到边缘`,
               error: (error) => errorMessage(error),
             })
           }}
         >
-          <Icon name="shield" width={17} height={17} /><span>{backend === 'loading' ? '连接中' : '发布配置'}</span>
+          <Icon name="shield" width={17} height={17} /><span>发布配置</span>
         </button>
       </div>
     </header>
@@ -248,27 +246,16 @@ function StatusBadge({ state, label }: { state: HealthState; label?: string }) {
   return <span className={clsx('status-badge', `is-${state}`)}><span className="status-dot" />{label ?? stateText[state]}</span>
 }
 
-function Segmented({ values, active, onChange, label }: { values: string[]; active: string; onChange: (value: string) => void; label: string }) {
-  return (
-    <div className="segmented" role="group" aria-label={label}>
-      {values.map((value) => <button type="button" key={value} className={active === value ? 'is-active' : ''} onClick={() => onChange(value)}>{value}</button>)}
-    </div>
-  )
-}
-
-function StatCard({ label, value, detail, trend, tone = 'blue' }: { label: string; value: string; detail: string; trend?: string; tone?: 'blue' | 'green' | 'violet' | 'orange' }) {
+function StatCard({ label, value, detail, tone = 'blue' }: { label: string; value: string; detail: string; tone?: 'blue' | 'green' | 'violet' | 'orange' }) {
   return (
     <section className="stat-card">
       <div className={clsx('stat-icon', `tone-${tone}`)}><Icon name={label.includes('TTFB') ? 'activity' : label.includes('端点') ? 'server' : label.includes('转移') ? 'shield' : 'globe'} width={18} height={18} /></div>
       <div className="stat-copy"><span>{label}</span><strong>{value}</strong><small>{detail}</small></div>
-      {trend && <span className="trend-chip">{trend}</span>}
     </section>
   )
 }
 
 function DashboardPage() {
-  const [range, setRange] = useState('24 小时')
-  const backend = useControlPlane((state) => state.backend)
   const endpoints = useControlPlane((state) => state.endpoints)
   const loadBalancers = useControlPlane((state) => state.loadBalancers)
   const logs = useControlPlane((state) => state.logs)
@@ -276,27 +263,24 @@ function DashboardPage() {
   const failovers = useControlPlane((state) => state.failovers)
   const toggleEndpointHealth = useControlPlane((state) => state.toggleEndpointHealth)
   const healthyCount = endpoints.filter((endpoint) => endpoint.state === 'healthy').length
-  const ashburn = endpoints.find((endpoint) => endpoint.id === 'origin-iad') ?? endpoints[0]
-  const chartData = backend === 'connected' ? liveTraffic : trafficData
-  const requestTotal = backend === 'connected' ? loadBalancers.reduce((sum, item) => sum + item.requests, 0) : 32481
+  const firstEndpoint = endpoints[0]
+  const chartData = liveTraffic
+  const requestTotal = loadBalancers.reduce((sum, item) => sum + item.requests, 0)
   const measuredTtfb = loadBalancers.map((item) => item.ttfb).filter((value) => value > 0)
-  const averageTtfb = backend === 'connected' ? Math.round(measuredTtfb.reduce((sum, value) => sum + value, 0) / (measuredTtfb.length || 1)) : 182
+  const averageTtfb = Math.round(measuredTtfb.reduce((sum, value) => sum + value, 0) / (measuredTtfb.length || 1))
   const siteRequestTotal = loadBalancers.reduce((sum, item) => sum + item.requests, 0)
-  const siteSplit = backend === 'connected'
-    ? (siteRequestTotal ? loadBalancers.map((item) => ({ name: item.site, value: Math.round(item.requests / siteRequestTotal * 100) })) : [{ name: '暂无请求', value: 100 }])
-    : requestSplit
+  const siteSplit = siteRequestTotal ? loadBalancers.map((item) => ({ name: item.site, value: Math.round(item.requests / siteRequestTotal * 100) })) : []
   const availability = endpoints.length ? healthyCount / endpoints.length * 100 : 0
 
   return (
     <>
       <PageIntro
-        description={backend === 'connected' ? `${loadBalancers.length} 个域名 · ${endpoints.length} 台 VPS。数据来自 Cloudflare 控制面。` : `4 个域名 · 5 个站点 · ${endpoints.length} 台 VPS。当前为本地演示数据。`}
-        action={<Segmented values={['1 小时', '24 小时', '7 天']} active={range} onChange={setRange} label="分析时间范围" />}
+        description={`${loadBalancers.length} 个域名 · ${endpoints.length} 个源站。数据来自 Cloudflare 控制面。`}
       />
 
       <div className="stat-grid">
-        <StatCard label="负载平衡请求" value={formatNumber(requestTotal)} detail="过去 24 小时" trend={backend === 'connected' ? undefined : '+8.4%'} tone="blue" />
-        <StatCard label="边缘 TTFB 平均值" value={averageTtfb ? `${averageTtfb} ms` : '—'} detail="过去 24 小时采样" trend={backend === 'connected' ? undefined : '-14 ms'} tone="violet" />
+        <StatCard label="负载平衡请求" value={formatNumber(requestTotal)} detail="过去 24 小时" tone="blue" />
+        <StatCard label="边缘 TTFB 平均值" value={averageTtfb ? `${averageTtfb} ms` : '—'} detail="过去 24 小时采样" tone="violet" />
         <StatCard label="健康端点" value={`${healthyCount} / ${endpoints.length}`} detail="主动检查每 60 秒" tone="green" />
         <StatCard label="自动故障转移" value={formatNumber(failovers)} detail="过去 24 小时" tone="orange" />
       </div>
@@ -316,27 +300,24 @@ function DashboardPage() {
               </div>
             ))}
           </div>
-          <button
+          {firstEndpoint && <button
             className={button({ intent: 'secondary' })}
             type="button"
-            disabled={!ashburn}
             onClick={async () => {
-              if (!ashburn) return
               try {
-                await toggleEndpointHealth(ashburn.id)
-                const recovering = ashburn.state === 'unhealthy'
-                recovering ? toast.success(`${ashburn.name} 已恢复`) : toast.warning(`${ashburn.name} 已移出路由`)
+                await toggleEndpointHealth(firstEndpoint.id)
+                const recovering = firstEndpoint.state === 'unhealthy'
+                recovering ? toast.success(`${firstEndpoint.name} 已恢复`) : toast.warning(`${firstEndpoint.name} 已移出路由`)
               } catch (error) { toast.error(errorMessage(error)) }
             }}
           >
-            {ashburn?.state === 'unhealthy' ? `恢复 ${ashburn.name}` : `模拟 ${ashburn?.name ?? '源站'}故障`}
-          </button>
+            {firstEndpoint.state === 'unhealthy' ? `恢复 ${firstEndpoint.name}` : `模拟 ${firstEndpoint.name} 故障`}
+          </button>}
         </section>
 
         <section className="surface request-chart-card">
           <div className="surface-heading chart-title-row">
-            <div><span className="section-kicker">{range}</span><h2>负载平衡请求</h2><strong className="hero-metric">{formatNumber(requestTotal)} {backend !== 'connected' && <span>+8.4%</span>}</strong></div>
-            <Segmented values={['请求', '错误']} active="请求" onChange={() => undefined} label="请求图表指标" />
+            <div><span className="section-kicker">24 小时</span><h2>负载平衡请求</h2><strong className="hero-metric">{formatNumber(requestTotal)}</strong></div>
           </div>
           <div className="chart-box tall-chart" aria-label="请求量柱状图">
             <ResponsiveContainer width="100%" height="100%">
@@ -355,8 +336,7 @@ function DashboardPage() {
       <div className="dashboard-secondary-grid">
         <section className="surface latency-card">
           <div className="surface-heading chart-title-row">
-            <div><span className="section-kicker">性能监控</span><h2>边缘 TTFB</h2><strong className="hero-metric">{averageTtfb ? `${averageTtfb} ms` : '—'} {backend !== 'connected' && <span>-7.1%</span>}</strong></div>
-            <button type="button" className="more-button" aria-label="更多 TTFB 选项"><Icon name="more" width={18} height={18} /></button>
+            <div><span className="section-kicker">性能监控</span><h2>边缘 TTFB</h2><strong className="hero-metric">{averageTtfb ? `${averageTtfb} ms` : '—'}</strong></div>
           </div>
           <div className="chart-box" aria-label="TTFB 趋势图">
             <ResponsiveContainer width="100%" height="100%">
@@ -381,10 +361,11 @@ function DashboardPage() {
               <ResponsiveContainer width="100%" height="100%">
                 <PieChart><Pie data={siteSplit} dataKey="value" innerRadius={48} outerRadius={72} paddingAngle={3} stroke="none" isAnimationActive={false}>{siteSplit.map((_, index) => <Cell key={index} fill={['#7c3aed', '#2878ff', '#98e900', '#ff9f2e', '#c8cad0'][index % 5]} />)}</Pie></PieChart>
               </ResponsiveContainer>
-              <span><strong>{backend === 'connected' ? `${availability.toFixed(1)}%` : '99.98%'}</strong><small>可用性</small></span>
+              <span><strong>{endpoints.length ? `${availability.toFixed(1)}%` : '—'}</strong><small>可用性</small></span>
             </div>
             <div className="split-list">
-              {siteSplit.map((item, index) => <div key={item.name}><span><i style={{ background: ['#7c3aed', '#2878ff', '#98e900', '#ff9f2e', '#c8cad0'][index % 5] }} />{item.name}</span><strong>{siteRequestTotal || backend !== 'connected' ? item.value : 0}%</strong></div>)}
+              {siteSplit.map((item, index) => <div key={item.name}><span><i style={{ background: ['#7c3aed', '#2878ff', '#98e900', '#ff9f2e', '#c8cad0'][index % 5] }} />{item.name}</span><strong>{item.value}%</strong></div>)}
+              {!siteSplit.length && <p className="empty-copy">暂无请求数据</p>}
             </div>
           </div>
         </section>
@@ -714,15 +695,13 @@ function SettingsPage() {
           {attachedDomainCount > 0 && <p className="token-route-warning">已有 {attachedDomainCount} 个域名由本系统接入。请先删除对应负载平衡器，让系统清理 Worker Route，再清除 Token。</p>}
         </section>
         <section className="surface settings-card"><div className="settings-heading"><div><h2>外观</h2><p>选择控制台使用的显示主题。</p></div></div><label className="settings-row"><span><strong>深色模式</strong><small>跟随当前控制台设置，不影响站点流量。</small></span><span className="switch-control"><input type="checkbox" checked={theme === 'dark'} onChange={toggleTheme} /><span /></span></label></section>
-        <section className="surface settings-card"><div className="settings-heading"><div><h2>配置发布</h2><p>先验证，再把版本化快照发布到 KV。</p></div></div><label className="settings-row"><span><strong>发布前健康验证</strong><small>任一池没有健康源站时阻止发布。</small></span><span className="switch-control"><input type="checkbox" defaultChecked /><span /></span></label><label className="settings-row"><span><strong>保留历史版本</strong><small>在 D1 中保存最近 20 个可回滚版本。</small></span><span className="switch-control"><input type="checkbox" defaultChecked /><span /></span></label></section>
-        <section className="surface settings-card"><div className="settings-heading"><div><h2>访问控制</h2><p>建议由 Cloudflare Access 保护管理 Worker。</p></div><span className="soft-chip">推荐</span></div><div className="settings-row"><span><strong>Cloudflare Access</strong><small>仅允许指定身份提供商和电子邮件域登录。</small></span><button className={button({ intent: 'secondary', compact: true })} type="button" onClick={() => toast.info('部署阶段将引导配置 Access 策略')}>配置</button></div></section>
       </div>
     </>
   )
 }
 
 function DataToolbar({ count, unit, query, setQuery, placeholder }: { count: number; unit: string; query: string; setQuery: (query: string) => void; placeholder: string }) {
-  return <div className="data-toolbar"><div><span>总计</span><strong>{count}</strong><small>{unit}</small></div><div className="data-toolbar-controls"><button className={button({ intent: 'secondary', compact: true })} type="button"><Icon name="filter" width={16} height={16} />全部状态</button><label className="search-field"><Icon name="search" width={17} height={17} /><input type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder={placeholder} /></label></div></div>
+  return <div className="data-toolbar"><div><span>总计</span><strong>{count}</strong><small>{unit}</small></div><label className="search-field"><Icon name="search" width={17} height={17} /><input type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder={placeholder} /></label></div>
 }
 
 function DeleteResourceButton({ kind, id, name, compact = false }: { kind: ResourceKind; id: string; name: string; compact?: boolean }) {
