@@ -40,7 +40,7 @@ try {
     const result = await api('/api/origins', { method: 'POST', body: JSON.stringify({ name: `Full ${origins[index].name} ${suffix}`, address: `127.0.0.1:${port}`, region: 'Local', latitude: 40 + index, longitude: -74 + index, weight: 50 }) }, 201)
     originIds.push(result.id)
   }
-  monitorId = (await api('/api/monitors', { method: 'POST', body: JSON.stringify({ name: `Full Monitor ${suffix}`, type: 'HTTP', path: '/healthz', interval: 60, timeout: 3, expected: '200-299', consecutiveSuccesses: 1 }) }, 201)).id
+  monitorId = (await api('/api/monitors', { method: 'POST', body: JSON.stringify({ name: `Full Monitor ${suffix}`, type: 'HTTP', method: 'GET', path: '/healthz', interval: 60, timeout: 3, expected: '200-299', consecutiveSuccesses: 1 }) }, 201)).id
   poolId = (await api('/api/pools', { method: 'POST', body: JSON.stringify({ name: `Full Pool ${suffix}`, monitor: monitorId, origins: originIds }) }, 201)).id
   loadBalancerId = (await api('/api/load-balancers', { method: 'POST', body: JSON.stringify({ hostname, site: 'Full E2E', steering: 'random', sessionAffinity: true, pools: [poolId] }) }, 201)).id
 

@@ -1,4 +1,4 @@
-import { ACTIVE_SNAPSHOT_KEY, type ConfigSnapshot, healthKey, type SnapshotLoadBalancer, type SnapshotOrigin, type SnapshotPool } from '../shared/model'
+import { ACTIVE_SNAPSHOT_KEY, type ConfigSnapshot, healthKey, originConnectionHost, type SnapshotLoadBalancer, type SnapshotOrigin, type SnapshotPool } from '../shared/model'
 
 interface Env {
   CONFIG_KV: KVNamespace
@@ -142,14 +142,22 @@ async function affinityOrigin(request: Request, candidates: Candidate[], secret:
   return candidates.find((item) => item.origin.id === originId && item.state !== 'unhealthy')
 }
 
-function originRequest(request: Request<unknown, unknown>, origin: SnapshotOrigin): Request<unknown, IncomingRequestCfProperties> {
+function originRequest(request: Request<unknown, unknown>, origin: SnapshotOrigin, loadBalancer: SnapshotLoadBalancer): Request<unknown, IncomingRequestCfProperties> {
   const incomingUrl = new URL(request.url)
-  incomingUrl.host = origin.address
+  const connectionHost = originConnectionHost(origin)
+  if (loadBalancer.originHost && !connectionHost) throw new Error('自定义源站 Host 需要为源站设置连接主机名，不能直接使用 IP')
+  if (connectionHost) {
+    const address = new URL(`https://${origin.address}`)
+    incomingUrl.hostname = loadBalancer.originHost ?? loadBalancer.hostname
+    incomingUrl.port = address.port
+  } else {
+    incomingUrl.host = origin.address
+  }
   const headers = new Headers(request.headers)
   headers.set('x-forwarded-host', new URL(request.url).host)
   headers.set('x-forwarded-proto', new URL(request.url).protocol.replace(':', ''))
   headers.set('x-worker-lb-origin-id', origin.id)
-  return new Request(incomingUrl, { method: request.method, headers, body: request.body, redirect: 'manual' }) as Request<unknown, IncomingRequestCfProperties>
+  return new Request(incomingUrl, { method: request.method, headers, body: request.body, redirect: 'manual', cf: connectionHost ? { resolveOverride: connectionHost } : undefined }) as Request<unknown, IncomingRequestCfProperties>
 }
 
 function retryable(response: Response) {
@@ -187,7 +195,7 @@ async function handleTraffic(request: Request<unknown, IncomingRequestCfProperti
   let firstResponse: Response | null = null
   let firstError: string | undefined
   try {
-    firstResponse = await fetch(originRequest(request.clone(), first.origin))
+    firstResponse = await fetch(originRequest(request.clone(), first.origin, loadBalancer))
   } catch (error) {
     firstError = error instanceof Error ? error.message : '源站连接失败'
   }
@@ -201,7 +209,7 @@ async function handleTraffic(request: Request<unknown, IncomingRequestCfProperti
     const second = chooseCandidate(request, loadBalancer, alternatives)
     if (second) {
       try {
-        const secondResponse = await fetch(originRequest(request.clone(), second.origin))
+        const secondResponse = await fetch(originRequest(request.clone(), second.origin, loadBalancer))
         selected = second
         response = secondResponse
         failedOver = true

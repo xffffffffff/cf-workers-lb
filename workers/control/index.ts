@@ -4,6 +4,7 @@ import {
   normalizeHostname,
   normalizeOriginAddress,
   numberInRange,
+  parseHeaders,
   requiredText,
   type ConfigSnapshot,
   type SteeringPolicy,
@@ -56,6 +57,34 @@ async function readJson(request: Request): Promise<JsonObject> {
 
 function booleanValue(value: unknown, fallback: boolean) {
   return typeof value === 'boolean' ? value : fallback
+}
+
+function optionalPort(value: unknown, fallback: number | null = null) {
+  if (value === undefined) return fallback
+  if (value === null || value === '') return null
+  return integerInRange(value, 1, 65535, '端口')
+}
+
+function requestMethod(value: unknown, fallback: 'GET' | 'HEAD' = 'GET') {
+  const method = String(value ?? fallback).toUpperCase()
+  if (method !== 'GET' && method !== 'HEAD') throw new Error('监视器请求方法只支持 GET 或 HEAD')
+  return method as 'GET' | 'HEAD'
+}
+
+function requestHeaders(value: unknown, fallback: Record<string, string> = {}) {
+  if (value === undefined) return fallback
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('请求头必须是 JSON 对象')
+  const entries = Object.entries(value)
+  if (entries.length > 32) throw new Error('请求头不能超过 32 项')
+  const headers: Record<string, string> = {}
+  for (const [rawName, rawValue] of entries) {
+    const name = rawName.trim()
+    const headerValue = String(rawValue).trim()
+    if (!name || !/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(name)) throw new Error(`请求头名称无效：${rawName}`)
+    if (name.length > 128 || headerValue.length > 2048 || /[\r\n]/.test(headerValue)) throw new Error(`请求头内容无效：${name}`)
+    headers[name] = headerValue
+  }
+  return headers
 }
 
 function stringArray(value: unknown, label: string) {
@@ -143,11 +172,11 @@ function aggregateHealth(states: string[]) {
 
 async function getControlState(db: D1Database) {
   const [originsQuery, monitorsQuery, poolsQuery, poolOriginsQuery, loadBalancersQuery, loadBalancerPoolsQuery, healthQuery, logsQuery, versionQuery, analyticsQuery, trafficQuery, sampleRateQuery, credentialQuery, routesQuery] = await Promise.all([
-    db.prepare('SELECT id, name, address, region, latitude, longitude, weight, enabled FROM origins ORDER BY created_at DESC').all<Record<string, unknown>>(),
-    db.prepare('SELECT m.id, m.name, m.type, m.path, m.interval_seconds, m.timeout_seconds, m.expected_codes, m.consecutive_fails, m.consecutive_successes, COUNT(p.id) AS pools FROM monitors m LEFT JOIN pools p ON p.monitor_id = m.id GROUP BY m.id ORDER BY m.created_at DESC').all<Record<string, unknown>>(),
+    db.prepare('SELECT id, name, address, connection_host, region, latitude, longitude, weight, enabled FROM origins ORDER BY created_at DESC').all<Record<string, unknown>>(),
+    db.prepare('SELECT m.id, m.name, m.type, m.method, m.path, m.port, m.interval_seconds, m.timeout_seconds, m.expected_codes, m.consecutive_fails, m.consecutive_successes, m.headers_json, m.follow_redirects, COUNT(p.id) AS pools FROM monitors m LEFT JOIN pools p ON p.monitor_id = m.id GROUP BY m.id ORDER BY m.created_at DESC').all<Record<string, unknown>>(),
     db.prepare('SELECT id, name, description, monitor_id, minimum_healthy, enabled FROM pools ORDER BY created_at DESC').all<Record<string, unknown>>(),
     db.prepare('SELECT pool_id, origin_id, priority, weight_override, enabled FROM pool_origins ORDER BY priority').all<Record<string, unknown>>(),
-    db.prepare('SELECT id, hostname, site, steering, session_affinity, affinity_ttl_seconds, proximity_buffer, enabled FROM load_balancers ORDER BY created_at DESC').all<Record<string, unknown>>(),
+    db.prepare('SELECT id, hostname, origin_host, site, steering, session_affinity, affinity_ttl_seconds, proximity_buffer, enabled FROM load_balancers ORDER BY created_at DESC').all<Record<string, unknown>>(),
     db.prepare('SELECT load_balancer_id, pool_id, priority, enabled FROM load_balancer_pools ORDER BY priority').all<Record<string, unknown>>(),
     db.prepare('SELECT pool_id, origin_id, state, last_latency_ms, last_checked_at FROM health_states').all<Record<string, unknown>>(),
     db.prepare('SELECT id, occurred_at, event_type, hostname, pool_id, origin_id, status_code, duration_ms, level, message FROM events ORDER BY occurred_at DESC LIMIT 200').all<Record<string, unknown>>(),
@@ -167,7 +196,7 @@ async function getControlState(db: D1Database) {
   const origins = (originsQuery.results ?? []).map((row) => {
     const health = healthForOrigin(String(row.id))
     const latencies = health.map((item) => Number(item.last_latency_ms)).filter(Number.isFinite)
-    return { id: row.id, name: row.name, address: row.address, region: row.region, coordinates: `${Number(row.latitude).toFixed(4)}, ${Number(row.longitude).toFixed(4)}`, latitude: row.latitude, longitude: row.longitude, latency: latencies.length ? Math.round(latencies.reduce((sum, value) => sum + value, 0) / latencies.length) : 0, weight: row.weight, enabled: Boolean(row.enabled), state: aggregateHealth(health.map((item) => String(item.state))) }
+    return { id: row.id, name: row.name, address: row.address, connectionHost: row.connection_host, region: row.region, coordinates: `${Number(row.latitude).toFixed(4)}, ${Number(row.longitude).toFixed(4)}`, latitude: row.latitude, longitude: row.longitude, latency: latencies.length ? Math.round(latencies.reduce((sum, value) => sum + value, 0) / latencies.length) : 0, weight: row.weight, enabled: Boolean(row.enabled), state: aggregateHealth(health.map((item) => String(item.state))) }
   })
 
   const pools = (poolsQuery.results ?? []).map((row) => ({ id: row.id, name: row.name, description: row.description, monitor: row.monitor_id, minimumHealthy: row.minimum_healthy, enabled: Boolean(row.enabled), origins: poolOriginRows.filter((item) => item.pool_id === row.id && item.enabled).map((item) => item.origin_id), state: aggregateHealth(healthForPool(String(row.id)).map((item) => String(item.state))) }))
@@ -175,7 +204,7 @@ async function getControlState(db: D1Database) {
   const monitors = (monitorsQuery.results ?? []).map((row) => {
     const monitorPoolIds = pools.filter((pool) => pool.monitor === row.id).map((pool) => String(pool.id))
     const states = healthRows.filter((item) => monitorPoolIds.includes(String(item.pool_id))).map((item) => String(item.state))
-    return { id: row.id, name: row.name, type: row.type, path: row.path, interval: row.interval_seconds, timeout: row.timeout_seconds, expected: row.expected_codes, consecutiveFails: row.consecutive_fails, consecutiveSuccesses: row.consecutive_successes, pools: row.pools, state: aggregateHealth(states) }
+    return { id: row.id, name: row.name, type: row.type, method: row.method, path: row.path, port: row.port, interval: row.interval_seconds, timeout: row.timeout_seconds, expected: row.expected_codes, consecutiveFails: row.consecutive_fails, consecutiveSuccesses: row.consecutive_successes, headers: parseHeaders(String(row.headers_json ?? '{}')), followRedirects: Boolean(row.follow_redirects), pools: row.pools, state: aggregateHealth(states) }
   })
 
   const steeringLabels: Record<string, string> = { proximity: '邻近感知', latency: '动态延迟', random: '随机', failover: '故障转移' }
@@ -188,7 +217,7 @@ async function getControlState(db: D1Database) {
     const states = pools.filter((pool) => poolIds.includes(String(pool.id))).map((pool) => String(pool.state))
     const analytics = analyticsByHost.get(String(row.hostname))
     const route = routesByLoadBalancer.get(String(row.id))
-    return { id: row.id, hostname: row.hostname, site: row.site, pools: poolIds, steering: steeringLabels[String(row.steering)] ?? '故障转移', sessionAffinity: Boolean(row.session_affinity), affinityTtlSeconds: row.affinity_ttl_seconds, proximityBuffer: row.proximity_buffer, enabled: Boolean(row.enabled), state: aggregateHealth(states), ttfb: Math.round(Number(analytics?.ttfb ?? 0)), requests: Math.round(Number(analytics?.samples ?? 0) / sampleRate), failovers: Number(analytics?.failovers ?? 0), domain: route ? { zone: route.zone_name, routePattern: route.route_pattern, routeManaged: Boolean(route.route_created), dnsManaged: Boolean(route.dns_created) } : null }
+    return { id: row.id, hostname: row.hostname, originHost: row.origin_host, site: row.site, pools: poolIds, steering: steeringLabels[String(row.steering)] ?? '故障转移', sessionAffinity: Boolean(row.session_affinity), affinityTtlSeconds: row.affinity_ttl_seconds, proximityBuffer: row.proximity_buffer, enabled: Boolean(row.enabled), state: aggregateHealth(states), ttfb: Math.round(Number(analytics?.ttfb ?? 0)), requests: Math.round(Number(analytics?.samples ?? 0) / sampleRate), failovers: Number(analytics?.failovers ?? 0), domain: route ? { zone: route.zone_name, routePattern: route.route_pattern, routeManaged: Boolean(route.route_created), dnsManaged: Boolean(route.dns_created) } : null }
   })
 
   const originNames = new Map(origins.map((origin) => [String(origin.id), String(origin.name)]))
@@ -205,12 +234,13 @@ async function createOrigin(request: Request, env: Env) {
     id: createId('origin'),
     name: requiredText(body.name, '源站名称'),
     address: normalizeOriginAddress(body.address),
+    connectionHost: body.connectionHost ? normalizeHostname(body.connectionHost) : null,
     region: requiredText(body.region, '区域'),
     latitude: numberInRange(body.latitude, -90, 90, '纬度'),
     longitude: numberInRange(body.longitude, -180, 180, '经度'),
     weight: integerInRange(body.weight ?? 50, 0, 100, '权重'),
   }
-  await env.DB.prepare('INSERT INTO origins(id, name, address, region, latitude, longitude, weight, enabled) VALUES (?, ?, ?, ?, ?, ?, ?, 1)').bind(origin.id, origin.name, origin.address, origin.region, origin.latitude, origin.longitude, origin.weight).run()
+  await env.DB.prepare('INSERT INTO origins(id, name, address, connection_host, region, latitude, longitude, weight, enabled) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)').bind(origin.id, origin.name, origin.address, origin.connectionHost, origin.region, origin.latitude, origin.longitude, origin.weight).run()
   await recordEvent(env.DB, 'CONFIG', '源站已添加', { originId: origin.id })
   return json({ id: origin.id }, 201)
 }
@@ -222,13 +252,14 @@ async function updateOrigin(id: string, request: Request, env: Env) {
   const next = {
     name: body.name === undefined ? current.name : requiredText(body.name, '源站名称'),
     address: body.address === undefined ? current.address : normalizeOriginAddress(body.address),
+    connectionHost: body.connectionHost === undefined ? current.connection_host : body.connectionHost ? normalizeHostname(body.connectionHost) : null,
     region: body.region === undefined ? current.region : requiredText(body.region, '区域'),
     latitude: body.latitude === undefined ? current.latitude : numberInRange(body.latitude, -90, 90, '纬度'),
     longitude: body.longitude === undefined ? current.longitude : numberInRange(body.longitude, -180, 180, '经度'),
     weight: body.weight === undefined ? current.weight : integerInRange(body.weight, 0, 100, '权重'),
     enabled: body.enabled === undefined ? current.enabled : Number(booleanValue(body.enabled, true)),
   }
-  await env.DB.prepare("UPDATE origins SET name = ?, address = ?, region = ?, latitude = ?, longitude = ?, weight = ?, enabled = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?").bind(next.name, next.address, next.region, next.latitude, next.longitude, next.weight, next.enabled, id).run()
+  await env.DB.prepare("UPDATE origins SET name = ?, address = ?, connection_host = ?, region = ?, latitude = ?, longitude = ?, weight = ?, enabled = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?").bind(next.name, next.address, next.connectionHost, next.region, next.latitude, next.longitude, next.weight, next.enabled, id).run()
   await recordEvent(env.DB, 'CONFIG', '源站已更新', { originId: id })
   return json({ ok: true })
 }
@@ -239,16 +270,46 @@ async function createMonitor(request: Request, env: Env) {
   if (!['HTTP', 'HTTPS', 'TCP'].includes(type)) throw new Error('监视器协议无效')
   const monitor = {
     id: createId('monitor'), name: requiredText(body.name, '监视器名称'), type,
+    method: requestMethod(body.method),
     path: requiredText(body.path ?? '/healthz', '路径或端口'),
+    port: optionalPort(body.port),
     interval: integerInRange(body.interval ?? 60, 60, 3600, '检查间隔'),
     timeout: integerInRange(body.timeout ?? 5, 1, 30, '超时'),
     expected: requiredText(body.expected ?? '200-299', '预期状态码'),
     consecutiveFails: integerInRange(body.consecutiveFails ?? 2, 1, 10, '失败阈值'),
     consecutiveSuccesses: integerInRange(body.consecutiveSuccesses ?? 2, 1, 10, '恢复阈值'),
+    headers: requestHeaders(body.headers),
+    followRedirects: booleanValue(body.followRedirects, false),
   }
-  await env.DB.prepare('INSERT INTO monitors(id, name, type, path, interval_seconds, timeout_seconds, expected_codes, consecutive_fails, consecutive_successes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(monitor.id, monitor.name, monitor.type, monitor.path, monitor.interval, monitor.timeout, monitor.expected, monitor.consecutiveFails, monitor.consecutiveSuccesses).run()
+  await env.DB.prepare('INSERT INTO monitors(id, name, type, method, path, port, interval_seconds, timeout_seconds, expected_codes, consecutive_fails, consecutive_successes, headers_json, follow_redirects) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').bind(monitor.id, monitor.name, monitor.type, monitor.method, monitor.path, monitor.port, monitor.interval, monitor.timeout, monitor.expected, monitor.consecutiveFails, monitor.consecutiveSuccesses, JSON.stringify(monitor.headers), Number(monitor.followRedirects)).run()
   await recordEvent(env.DB, 'CONFIG', '监视器已创建')
   return json({ id: monitor.id }, 201)
+}
+
+async function updateMonitor(id: string, request: Request, env: Env) {
+  const current = await env.DB.prepare('SELECT * FROM monitors WHERE id = ?').bind(id).first<Record<string, unknown>>()
+  if (!current) return json({ error: '监视器不存在' }, 404)
+  const body = await readJson(request)
+  const type = body.type === undefined ? String(current.type) : String(body.type).toUpperCase()
+  if (!['HTTP', 'HTTPS', 'TCP'].includes(type)) throw new Error('监视器协议无效')
+  const headers = requestHeaders(body.headers, parseHeaders(String(current.headers_json ?? '{}')))
+  await env.DB.prepare("UPDATE monitors SET name = ?, type = ?, method = ?, path = ?, port = ?, interval_seconds = ?, timeout_seconds = ?, expected_codes = ?, consecutive_fails = ?, consecutive_successes = ?, headers_json = ?, follow_redirects = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?").bind(
+    body.name === undefined ? current.name : requiredText(body.name, '监视器名称'),
+    type,
+    requestMethod(body.method, String(current.method) as 'GET' | 'HEAD'),
+    body.path === undefined ? current.path : requiredText(body.path, '路径或端口'),
+    optionalPort(body.port, current.port == null ? null : Number(current.port)),
+    body.interval === undefined ? current.interval_seconds : integerInRange(body.interval, 60, 3600, '检查间隔'),
+    body.timeout === undefined ? current.timeout_seconds : integerInRange(body.timeout, 1, 30, '超时'),
+    body.expected === undefined ? current.expected_codes : requiredText(body.expected, '预期状态码'),
+    body.consecutiveFails === undefined ? current.consecutive_fails : integerInRange(body.consecutiveFails, 1, 10, '失败阈值'),
+    body.consecutiveSuccesses === undefined ? current.consecutive_successes : integerInRange(body.consecutiveSuccesses, 1, 10, '恢复阈值'),
+    JSON.stringify(headers),
+    body.followRedirects === undefined ? current.follow_redirects : Number(booleanValue(body.followRedirects, false)),
+    id,
+  ).run()
+  await recordEvent(env.DB, 'CONFIG', '监视器已更新')
+  return json({ ok: true })
 }
 
 async function createPool(request: Request, env: Env) {
@@ -309,7 +370,7 @@ async function createLoadBalancer(request: Request, env: Env) {
   if (!fallback?.address) throw new Error('所选池没有可用的 DNS 保底源站')
   const provisioned = await provisionHostname(hostname, fallback.address, env)
   const statements = [
-    env.DB.prepare('INSERT INTO load_balancers(id, hostname, site, steering, session_affinity, affinity_ttl_seconds, proximity_buffer, enabled) VALUES (?, ?, ?, ?, ?, ?, ?, 1)').bind(id, hostname, requiredText(body.site, '站点名称'), steeringValue(body.steering), Number(booleanValue(body.sessionAffinity, true)), integerInRange(body.affinityTtlSeconds ?? 1800, 60, 604800, '会话保持时间'), numberInRange(body.proximityBuffer ?? 0.15, 0, 1, '距离缓冲')),
+    env.DB.prepare('INSERT INTO load_balancers(id, hostname, origin_host, site, steering, session_affinity, affinity_ttl_seconds, proximity_buffer, enabled) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)').bind(id, hostname, body.originHost ? normalizeHostname(body.originHost) : null, requiredText(body.site, '站点名称'), steeringValue(body.steering), Number(booleanValue(body.sessionAffinity, true)), integerInRange(body.affinityTtlSeconds ?? 1800, 60, 604800, '会话保持时间'), numberInRange(body.proximityBuffer ?? 0.15, 0, 1, '距离缓冲')),
     ...pools.map((poolId, priority) => env.DB.prepare('INSERT INTO load_balancer_pools(load_balancer_id, pool_id, priority, enabled) VALUES (?, ?, ?, 1)').bind(id, poolId, priority)),
     env.DB.prepare('INSERT INTO load_balancer_routes(load_balancer_id, zone_id, zone_name, route_id, route_pattern, route_created, dns_record_id, dns_created) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').bind(id, provisioned.zoneId, provisioned.zoneName, provisioned.routeId, provisioned.routePattern, Number(provisioned.routeCreated), provisioned.dnsRecordId, Number(provisioned.dnsCreated)),
   ]
@@ -328,11 +389,11 @@ async function testMonitor(request: Request, env: Env) {
   const originId = requiredText(body.originId, '源站')
   const monitorId = requiredText(body.monitorId, '监视器')
   const [origin, monitor] = await Promise.all([
-    env.DB.prepare('SELECT id, name, address, region, latitude, longitude, weight FROM origins WHERE id = ?').bind(originId).first<Record<string, unknown>>(),
-    env.DB.prepare('SELECT id, name, type, path, interval_seconds, timeout_seconds, expected_codes, consecutive_fails, consecutive_successes, headers_json, follow_redirects FROM monitors WHERE id = ?').bind(monitorId).first<Record<string, unknown>>(),
+    env.DB.prepare('SELECT id, name, address, connection_host, region, latitude, longitude, weight FROM origins WHERE id = ?').bind(originId).first<Record<string, unknown>>(),
+    env.DB.prepare('SELECT id, name, type, method, path, port, interval_seconds, timeout_seconds, expected_codes, consecutive_fails, consecutive_successes, headers_json, follow_redirects FROM monitors WHERE id = ?').bind(monitorId).first<Record<string, unknown>>(),
   ])
   if (!origin || !monitor) return json({ error: '源站或监视器不存在' }, 404)
-  const result = await probeOrigin({ id: String(origin.id), name: String(origin.name), address: String(origin.address), region: String(origin.region), latitude: Number(origin.latitude), longitude: Number(origin.longitude), weight: Number(origin.weight) }, { id: String(monitor.id), name: String(monitor.name), type: String(monitor.type) as 'HTTP' | 'HTTPS' | 'TCP', path: String(monitor.path), intervalSeconds: Number(monitor.interval_seconds), timeoutSeconds: Number(monitor.timeout_seconds), expectedCodes: String(monitor.expected_codes), consecutiveFails: Number(monitor.consecutive_fails), consecutiveSuccesses: Number(monitor.consecutive_successes), headers: JSON.parse(String(monitor.headers_json || '{}')) as Record<string, string>, followRedirects: Boolean(monitor.follow_redirects) })
+  const result = await probeOrigin({ id: String(origin.id), name: String(origin.name), address: String(origin.address), connectionHost: origin.connection_host ? String(origin.connection_host) : null, region: String(origin.region), latitude: Number(origin.latitude), longitude: Number(origin.longitude), weight: Number(origin.weight) }, { id: String(monitor.id), name: String(monitor.name), type: String(monitor.type) as 'HTTP' | 'HTTPS' | 'TCP', method: requestMethod(monitor.method), path: String(monitor.path), port: monitor.port == null ? null : Number(monitor.port), intervalSeconds: Number(monitor.interval_seconds), timeoutSeconds: Number(monitor.timeout_seconds), expectedCodes: String(monitor.expected_codes), consecutiveFails: Number(monitor.consecutive_fails), consecutiveSuccesses: Number(monitor.consecutive_successes), headers: parseHeaders(String(monitor.headers_json || '{}')), followRedirects: Boolean(monitor.follow_redirects) })
   return json(result, result.ok ? 200 : 422)
 }
 
@@ -454,6 +515,7 @@ async function routeApi(request: Request, env: Env) {
   if (request.method === 'PATCH' && parts[1] === 'origins' && parts.length === 3) return updateOrigin(parts[2], request, env)
   if (request.method === 'POST' && parts[1] === 'origins' && parts[3] === 'health') return overrideHealth(parts[2], request, env)
   if (request.method === 'POST' && path === '/api/monitors') return createMonitor(request, env)
+  if (request.method === 'PATCH' && parts[1] === 'monitors' && parts.length === 3) return updateMonitor(parts[2], request, env)
   if (request.method === 'POST' && path === '/api/monitors/test') return testMonitor(request, env)
   if (request.method === 'POST' && path === '/api/pools') return createPool(request, env)
   if (request.method === 'PATCH' && parts[1] === 'pools' && parts.length === 3) return updatePool(parts[2], request, env)

@@ -28,7 +28,9 @@ interface ControlPlaneState {
   refresh: () => Promise<void>
   publish: () => Promise<number>
   addEndpoint: (endpoint: Endpoint) => Promise<void>
+  updateEndpoint: (endpoint: Endpoint) => Promise<void>
   addMonitor: (monitor: Monitor) => Promise<void>
+  updateMonitor: (monitor: Monitor) => Promise<void>
   addPool: (pool: Pool) => Promise<void>
   addLoadBalancer: (loadBalancer: LoadBalancer) => Promise<void>
   togglePool: (id: string) => Promise<void>
@@ -132,12 +134,23 @@ export const useControlPlane = create<ControlPlaneState>((set, get) => ({
   addEndpoint: async (endpoint) => {
     requireConnection(get().backend)
     const [latitude, longitude] = endpoint.coordinates.split(',').map(Number)
-    await apiRequest('/api/origins', { method: 'POST', body: JSON.stringify({ name: endpoint.name, address: endpoint.address, region: endpoint.region, latitude, longitude, weight: endpoint.weight }) })
+    await apiRequest('/api/origins', { method: 'POST', body: JSON.stringify({ name: endpoint.name, address: endpoint.address, connectionHost: endpoint.connectionHost, region: endpoint.region, latitude, longitude, weight: endpoint.weight }) })
+    await get().refresh()
+  },
+  updateEndpoint: async (endpoint) => {
+    requireConnection(get().backend)
+    const [latitude, longitude] = endpoint.coordinates.split(',').map(Number)
+    await apiRequest(`/api/origins/${encodeURIComponent(endpoint.id)}`, { method: 'PATCH', body: JSON.stringify({ name: endpoint.name, address: endpoint.address, connectionHost: endpoint.connectionHost, region: endpoint.region, latitude, longitude, weight: endpoint.weight }) })
     await get().refresh()
   },
   addMonitor: async (monitor) => {
     requireConnection(get().backend)
     await apiRequest('/api/monitors', { method: 'POST', body: JSON.stringify(monitor) })
+    await get().refresh()
+  },
+  updateMonitor: async (monitor) => {
+    requireConnection(get().backend)
+    await apiRequest(`/api/monitors/${encodeURIComponent(monitor.id)}`, { method: 'PATCH', body: JSON.stringify(monitor) })
     await get().refresh()
   },
   addPool: async (pool) => {

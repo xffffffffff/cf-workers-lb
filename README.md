@@ -48,13 +48,15 @@ cd cf-workers-lb && git pull --ff-only && ./install.sh --admin-host lb.example.c
 
 1. 在“设置”添加 Cloudflare API Token。
 2. 在“源站”添加 VPS，优先使用专用源站主机名。
-3. 创建 HTTPS/HTTP/TCP 监视器。
+3. 创建 HTTPS/HTTP/TCP 监视器；需要虚拟主机时，在该监视器中填写对应站点的 `Host`，也可配置端口、请求方法、附加请求头和跳转策略。
 4. 创建池并选择源站、监视器。
 5. 等待 Cron 至少完成两次健康检查。
 6. 创建负载平衡器。系统会自动创建或检查橙色云 DNS，并把精确主机名 Route 绑定到当前 Worker。
 7. 点击“发布配置”。健康源站数不足时，系统会阻止发布。
 
-源站主机名不能与负载平衡器主机名相同，否则会产生回环。WebUI 只为创建的负载平衡器生成精确主机名 Route。HTTPS 源站使用 IP 时必须具有与 IP 匹配的有效证书；实际部署更推荐 `origin.example.com` 形式的专用 DNS 名称。
+源站主机名不能与负载平衡器主机名相同，否则会产生回环。WebUI 只为创建的负载平衡器生成精确主机名 Route。监视器的 `Host` 和负载平衡器的“源站 Host”都是逐项配置，不存在内置站点域名。未配置自定义 Host 的 HTTPS 源站必须具有与连接地址匹配的有效证书；实际部署更推荐 `origin.example.com` 形式的专用 DNS 名称。
+
+Cloudflare Workers 不会可靠地转发手动改写的 `Host`。因此使用自定义 Host/SNI 时，还要在对应源站填写“连接主机名”：它应是同一 Cloudflare Zone 下、开启代理且指向该 VPS 的专用 DNS 名称，例如 `origin-1.example.com`。Worker 会保留监视器或业务站点的 Host/SNI，并通过 `resolveOverride` 定向连接该源站。该字段也不包含任何预设域名。
 
 ## 架构
 

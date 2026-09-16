@@ -5,6 +5,7 @@ export interface SnapshotOrigin {
   id: string
   name: string
   address: string
+  connectionHost: string | null
   region: string
   latitude: number
   longitude: number
@@ -15,7 +16,9 @@ export interface SnapshotMonitor {
   id: string
   name: string
   type: 'HTTP' | 'HTTPS' | 'TCP'
+  method: 'GET' | 'HEAD'
   path: string
+  port: number | null
   intervalSeconds: number
   timeoutSeconds: number
   expectedCodes: string
@@ -42,6 +45,7 @@ export interface SnapshotPool {
 export interface SnapshotLoadBalancer {
   id: string
   hostname: string
+  originHost: string | null
   site: string
   steering: SteeringPolicy
   sessionAffinity: boolean
@@ -103,6 +107,13 @@ export function normalizeOriginAddress(value: unknown) {
     throw new Error('源站地址格式无效')
   }
   return address
+}
+
+export function originConnectionHost(origin: Pick<SnapshotOrigin, 'address' | 'connectionHost'>) {
+  if (origin.connectionHost) return origin.connectionHost
+  const hostname = new URL(`https://${origin.address}`).hostname.replace(/^\[|\]$/g, '')
+  const isIpAddress = hostname.includes(':') || /^(?:\d{1,3}\.){3}\d{1,3}$/.test(hostname)
+  return isIpAddress ? null : hostname
 }
 
 export function numberInRange(value: unknown, min: number, max: number, label: string) {

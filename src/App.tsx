@@ -406,6 +406,7 @@ function LoadBalancersPage() {
     const next: LoadBalancer = {
       id: `lb-${Date.now()}`,
       hostname,
+      originHost: String(form.get('originHost') ?? '').trim() || null,
       site: String(form.get('site')),
       pools: [String(form.get('pool'))],
       steering: String(form.get('steering')) as LoadBalancer['steering'],
@@ -444,6 +445,7 @@ function LoadBalancersPage() {
         <form className="form-stack" onSubmit={submit}>
           <div className="domain-provision-note"><Icon name="globe" width={18} height={18} /><div><strong>自动接入域名</strong><p>系统将查找所属 Zone，检查或创建橙色云 DNS，再创建 <code>hostname/*</code> 精确 Worker Route。</p></div></div>
           <Field label="主机名"><input name="hostname" required placeholder="www.example.com" /></Field>
+          <Field label="源站 Host（可选）"><input name="originHost" placeholder="默认使用上面的公开主机名" /><small className="field-help">仅在源站虚拟主机与公开主机名不同时填写。</small></Field>
           <Field label="站点名称"><input name="site" required placeholder="生产官网" /></Field>
           <div className="field-row">
             <Field label="默认池"><select name="pool" defaultValue={pools[0]?.id}>{pools.map((pool) => <option key={pool.id} value={pool.id}>{pool.name}</option>)}</select></Field>
@@ -459,35 +461,83 @@ function LoadBalancersPage() {
 
 function MonitorsPage() {
   const [open, setOpen] = useState(false)
+  const [editing, setEditing] = useState<Monitor | null>(null)
   const monitors = useControlPlane((state) => state.monitors)
   const addMonitor = useControlPlane((state) => state.addMonitor)
+  const updateMonitor = useControlPlane((state) => state.updateMonitor)
   const testMonitor = useControlPlane((state) => state.testMonitor)
+
+  function openCreate() {
+    setEditing(null)
+    setOpen(true)
+  }
+
+  function openEdit(monitor: Monitor) {
+    setEditing(monitor)
+    setOpen(true)
+  }
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     const form = new FormData(event.currentTarget)
     const name = String(form.get('name'))
-    const next: Monitor = { id: `mon-${Date.now()}`, name, type: String(form.get('type')) as Monitor['type'], path: String(form.get('path')), interval: Number(form.get('interval')), timeout: Number(form.get('timeout')), expected: String(form.get('expected')), pools: 0, state: 'healthy' }
+    let extraHeaders: unknown = {}
+    const headersJson = String(form.get('headersJson') ?? '').trim()
+    try { extraHeaders = headersJson ? JSON.parse(headersJson) : {} } catch { toast.error('附加请求头必须是有效的 JSON 对象'); return }
+    if (!extraHeaders || typeof extraHeaders !== 'object' || Array.isArray(extraHeaders)) { toast.error('附加请求头必须是 JSON 对象'); return }
+    const headers = Object.fromEntries(Object.entries(extraHeaders).map(([key, value]) => [key, String(value)]))
+    for (const key of Object.keys(headers)) if (key.toLowerCase() === 'host') delete headers[key]
+    const host = String(form.get('host') ?? '').trim()
+    if (host) headers.Host = host
+    const next: Monitor = {
+      id: editing?.id ?? `mon-${Date.now()}`,
+      name,
+      type: String(form.get('type')) as Monitor['type'],
+      method: String(form.get('method')) as Monitor['method'],
+      path: String(form.get('path')),
+      port: String(form.get('port') ?? '').trim() ? Number(form.get('port')) : null,
+      interval: Number(form.get('interval')),
+      timeout: Number(form.get('timeout')),
+      expected: String(form.get('expected')),
+      consecutiveFails: Number(form.get('consecutiveFails')),
+      consecutiveSuccesses: Number(form.get('consecutiveSuccesses')),
+      headers,
+      followRedirects: form.get('followRedirects') === 'on',
+      pools: editing?.pools ?? 0,
+      state: editing?.state ?? 'healthy',
+    }
     try {
-      await addMonitor(next)
+      if (editing) await updateMonitor(next)
+      else await addMonitor(next)
       setOpen(false)
-      toast.success(`${name} 已创建`)
+      toast.success(`${name} 已${editing ? '更新' : '创建'}`)
     } catch (error) { toast.error(errorMessage(error)) }
   }
 
+  const editingHost = editing ? Object.entries(editing.headers).find(([key]) => key.toLowerCase() === 'host')?.[1] ?? '' : ''
+  const editingExtraHeaders = editing ? Object.fromEntries(Object.entries(editing.headers).filter(([key]) => key.toLowerCase() !== 'host')) : {}
+
   return (
     <>
-      <PageIntro description="主动检查源站是否可用；连续 2 次失败标记为不健康，连续 2 次成功后恢复。" action={<button className={button({ intent: 'primary' })} type="button" onClick={() => setOpen(true)}><Icon name="plus" width={17} height={17} />创建监视器</button>} />
+      <PageIntro description="主动检查源站是否可用；每个监视器可独立设置 Host、请求头、端口和恢复阈值。" action={<button className={button({ intent: 'primary' })} type="button" onClick={openCreate}><Icon name="plus" width={17} height={17} />创建监视器</button>} />
       <div className="monitor-grid">
-        {monitors.map((monitor) => <section className="surface monitor-card" key={monitor.id}><div className="monitor-top"><span className="monitor-icon"><Icon name="pulse" width={19} height={19} /></span><StatusBadge state={monitor.state} /></div><h2>{monitor.name}</h2><p>{monitor.type} · {monitor.path}</p><div className="mini-kv"><span>间隔<strong>{monitor.interval} 秒</strong></span><span>超时<strong>{monitor.timeout} 秒</strong></span><span>期望<strong>{monitor.expected}</strong></span><span>关联池<strong>{monitor.pools}</strong></span></div><div className="card-actions"><button className={button({ intent: 'secondary', compact: true })} type="button" onClick={() => { toast.promise(testMonitor(monitor.id), { loading: '正在检查源站…', success: (result) => `${monitor.name} 检查成功 · ${result.latencyMs} ms`, error: (error) => errorMessage(error) }) }}>立即测试</button><DeleteResourceButton kind="monitors" id={monitor.id} name={monitor.name} compact /></div></section>)}
+        {monitors.map((monitor) => {
+          const host = Object.entries(monitor.headers).find(([key]) => key.toLowerCase() === 'host')?.[1]
+          return <section className="surface monitor-card" key={monitor.id}><div className="monitor-top"><span className="monitor-icon"><Icon name="pulse" width={19} height={19} /></span><StatusBadge state={monitor.state} /></div><h2>{monitor.name}</h2><p>{monitor.method} · {monitor.type} · {monitor.path}{monitor.port ? `:${monitor.port}` : ''}</p>{host && <p className="monitor-host">Host · {host}</p>}<div className="mini-kv"><span>间隔<strong>{monitor.interval} 秒</strong></span><span>超时<strong>{monitor.timeout} 秒</strong></span><span>期望<strong>{monitor.expected}</strong></span><span>关联池<strong>{monitor.pools}</strong></span></div><div className="card-actions"><button className={button({ intent: 'secondary', compact: true })} type="button" onClick={() => openEdit(monitor)}>编辑</button><button className={button({ intent: 'secondary', compact: true })} type="button" onClick={() => { toast.promise(testMonitor(monitor.id), { loading: '正在检查源站…', success: (result) => `${monitor.name} 检查成功 · ${result.latencyMs} ms`, error: (error) => errorMessage(error) }) }}>立即测试</button><DeleteResourceButton kind="monitors" id={monitor.id} name={monitor.name} compact /></div></section>
+        })}
       </div>
-      <Modal open={open} onOpenChange={setOpen} title="创建监视器" description="定义主动健康检查请求和成功条件。">
-        <form className="form-stack" onSubmit={submit}>
-          <Field label="名称"><input name="name" required placeholder="HTTPS · Web 健康检查" /></Field>
-          <div className="field-row"><Field label="协议"><select name="type" defaultValue="HTTPS"><option>HTTPS</option><option>HTTP</option><option>TCP</option></select></Field><Field label="路径或端口"><input name="path" required defaultValue="/healthz" /></Field></div>
-          <div className="field-row"><Field label="检查间隔"><select name="interval" defaultValue="60"><option value="60">60 秒</option><option value="120">120 秒</option><option value="300">300 秒</option></select></Field><Field label="超时"><select name="timeout" defaultValue="5"><option value="3">3 秒</option><option value="5">5 秒</option><option value="10">10 秒</option></select></Field></div>
-          <Field label="预期状态码"><input name="expected" required defaultValue="200–299" /></Field>
-          <ModalActions onCancel={() => setOpen(false)} submit="创建监视器" />
+      <Modal open={open} onOpenChange={setOpen} title={editing ? '编辑监视器' : '创建监视器'} description="定义主动健康检查请求和成功条件；所有请求头都按监视器独立保存。">
+        <form className="form-stack" onSubmit={submit} key={editing?.id ?? 'new-monitor'}>
+          <Field label="名称"><input name="name" required placeholder="HTTPS · Web 健康检查" defaultValue={editing?.name} /></Field>
+          <div className="field-row"><Field label="协议"><select name="type" defaultValue={editing?.type ?? 'HTTPS'}><option>HTTPS</option><option>HTTP</option><option>TCP</option></select></Field><Field label="请求方法"><select name="method" defaultValue={editing?.method ?? 'GET'}><option>GET</option><option>HEAD</option></select></Field></div>
+          <div className="field-row"><Field label="路径"><input name="path" required defaultValue={editing?.path ?? '/healthz'} /></Field><Field label="端口（可选）"><input name="port" type="number" min="1" max="65535" defaultValue={editing?.port ?? ''} placeholder="HTTPS 默认 443" /></Field></div>
+          <Field label="Host 请求头（可选）"><input name="host" defaultValue={editingHost} placeholder="站点的源站虚拟主机名" /><small className="field-help">每个站点单独填写；留空不会发送自定义 Host。</small></Field>
+          <Field label="附加请求头（JSON，可选）"><textarea name="headersJson" defaultValue={Object.keys(editingExtraHeaders).length ? JSON.stringify(editingExtraHeaders, null, 2) : ''} placeholder={'{\n  "Authorization": "Bearer …"\n}'} spellCheck={false} /></Field>
+          <div className="field-row"><Field label="检查间隔"><select name="interval" defaultValue={String(editing?.interval ?? 60)}><option value="60">60 秒</option><option value="120">120 秒</option><option value="300">300 秒</option></select></Field><Field label="超时"><select name="timeout" defaultValue={String(editing?.timeout ?? 5)}><option value="3">3 秒</option><option value="5">5 秒</option><option value="10">10 秒</option></select></Field></div>
+          <Field label="预期状态码"><input name="expected" required defaultValue={editing?.expected ?? '200–299'} /></Field>
+          <div className="field-row"><Field label="连续失败阈值"><input name="consecutiveFails" type="number" min="1" max="10" defaultValue={editing?.consecutiveFails ?? 2} /></Field><Field label="连续成功阈值"><input name="consecutiveSuccesses" type="number" min="1" max="10" defaultValue={editing?.consecutiveSuccesses ?? 2} /></Field></div>
+          <label className="switch-row"><span><strong>跟随重定向</strong><small>关闭时，3xx 会直接参与状态码判断。</small></span><input type="checkbox" name="followRedirects" defaultChecked={editing?.followRedirects ?? false} /></label>
+          <ModalActions onCancel={() => setOpen(false)} submit={editing ? '保存更改' : '创建监视器'} />
         </form>
       </Modal>
     </>
@@ -546,8 +596,10 @@ function PoolsPage() {
 
 function OriginsPage() {
   const [open, setOpen] = useState(false)
+  const [editing, setEditing] = useState<Endpoint | null>(null)
   const endpoints = useControlPlane((state) => state.endpoints)
   const addEndpoint = useControlPlane((state) => state.addEndpoint)
+  const updateEndpoint = useControlPlane((state) => state.updateEndpoint)
   const toggleEndpointHealth = useControlPlane((state) => state.toggleEndpointHealth)
   const mapOrigins = endpoints.map((endpoint) => {
     const [latitude, longitude] = endpoint.coordinates.split(',').map(Number)
@@ -555,16 +607,27 @@ function OriginsPage() {
   }).filter((item) => Number.isFinite(item.x) && Number.isFinite(item.y))
   const route = mapOrigins.length > 1 ? `M${mapOrigins[0].x} ${mapOrigins[0].y} Q400 105 ${mapOrigins[1].x} ${mapOrigins[1].y}` : undefined
 
+  function openCreate() {
+    setEditing(null)
+    setOpen(true)
+  }
+
+  function openEdit(endpoint: Endpoint) {
+    setEditing(endpoint)
+    setOpen(true)
+  }
+
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     const form = new FormData(event.currentTarget)
     const name = String(form.get('name')).trim()
     const address = String(form.get('address')).trim()
+    const connectionHost = String(form.get('connectionHost') ?? '').trim() || null
     const region = String(form.get('region')).trim()
     const latitude = Number(form.get('latitude'))
     const longitude = Number(form.get('longitude'))
     const weight = Number(form.get('weight'))
-    const duplicate = endpoints.some((endpoint) => endpoint.address.toLowerCase() === address.toLowerCase())
+    const duplicate = endpoints.some((endpoint) => endpoint.id !== editing?.id && endpoint.address.toLowerCase() === address.toLowerCase())
 
     if (duplicate) {
       toast.error('该源站地址已经存在')
@@ -575,6 +638,7 @@ function OriginsPage() {
       id: `origin-${Date.now()}`,
       name,
       address,
+      connectionHost,
       region,
       coordinates: `${latitude.toFixed(4)}, ${longitude.toFixed(4)}`,
       latency: 0,
@@ -582,15 +646,16 @@ function OriginsPage() {
       state: 'healthy',
     }
     try {
-      await addEndpoint(next)
+      if (editing) await updateEndpoint(next)
+      else await addEndpoint(next)
       setOpen(false)
-      toast.success(`${name} 已添加`, { description: '现在可以在创建池时选择这个源站。' })
+      toast.success(`${name} 已${editing ? '更新' : '添加'}`, { description: editing ? '重新发布配置后在线上生效。' : '现在可以在创建池时选择这个源站。' })
     } catch (error) { toast.error(errorMessage(error)) }
   }
 
   return (
     <>
-      <PageIntro description="源站坐标用于邻近感知；访客优先路由到最近的健康端点，并使用 15% 缓冲抑制抖动。" action={<button className={button({ intent: 'primary' })} type="button" onClick={() => setOpen(true)}><Icon name="plus" width={17} height={17} />添加源站</button>} />
+      <PageIntro description="源站坐标用于邻近感知；连接主机名用于在不改变站点 Host/SNI 的前提下定向连接 VPS。" action={<button className={button({ intent: 'primary' })} type="button" onClick={openCreate}><Icon name="plus" width={17} height={17} />添加源站</button>} />
       <div className="origin-page-grid">
         <section className="surface proximity-map-card">
           <div className="surface-heading"><div><span className="section-kicker">邻近感知</span><h2>源站地图</h2></div><span className="soft-chip">15% 距离缓冲</span></div>
@@ -607,23 +672,24 @@ function OriginsPage() {
           </div>
         </section>
         <div className="origin-detail-stack">
-          {endpoints.map((endpoint) => <section className="surface origin-detail-card" key={endpoint.id}><div className="origin-detail-heading"><span className={clsx('origin-orb', `is-${endpoint.state}`)}><span /></span><div><h2>{endpoint.name}</h2><p>{endpoint.address}</p></div><StatusBadge state={endpoint.state} label={endpoint.state === 'degraded' && !endpoint.latency ? '待检查' : undefined} /></div><div className="mini-kv"><span>区域<strong>{endpoint.region}</strong></span><span>坐标<strong>{endpoint.coordinates}</strong></span><span>权重<strong>{endpoint.weight}</strong></span><span>延迟<strong>{endpoint.state === 'healthy' ? `${endpoint.latency} ms` : endpoint.state === 'degraded' ? '待检查' : '超时'}</strong></span></div><div className="card-actions"><button className={button({ intent: endpoint.state === 'healthy' ? 'danger' : 'secondary' })} type="button" onClick={async () => { try { await toggleEndpointHealth(endpoint.id); endpoint.state === 'healthy' ? toast.warning(`${endpoint.name} 已移出`) : toast.success(`${endpoint.name} 已恢复`) } catch (error) { toast.error(errorMessage(error)) } }}>{endpoint.state === 'healthy' ? '模拟故障' : '恢复节点'}</button><DeleteResourceButton kind="origins" id={endpoint.id} name={endpoint.name} compact /></div></section>)}
+          {endpoints.map((endpoint) => <section className="surface origin-detail-card" key={endpoint.id}><div className="origin-detail-heading"><span className={clsx('origin-orb', `is-${endpoint.state}`)}><span /></span><div><h2>{endpoint.name}</h2><p>{endpoint.address}</p>{endpoint.connectionHost && <p>连接 · {endpoint.connectionHost}</p>}</div><StatusBadge state={endpoint.state} label={endpoint.state === 'degraded' && !endpoint.latency ? '待检查' : undefined} /></div><div className="mini-kv"><span>区域<strong>{endpoint.region}</strong></span><span>坐标<strong>{endpoint.coordinates}</strong></span><span>权重<strong>{endpoint.weight}</strong></span><span>延迟<strong>{endpoint.state === 'healthy' ? `${endpoint.latency} ms` : endpoint.state === 'degraded' ? '待检查' : '超时'}</strong></span></div><div className="card-actions"><button className={button({ intent: 'secondary', compact: true })} type="button" onClick={() => openEdit(endpoint)}>编辑</button><button className={button({ intent: endpoint.state === 'healthy' ? 'danger' : 'secondary' })} type="button" onClick={async () => { try { await toggleEndpointHealth(endpoint.id); endpoint.state === 'healthy' ? toast.warning(`${endpoint.name} 已移出`) : toast.success(`${endpoint.name} 已恢复`) } catch (error) { toast.error(errorMessage(error)) } }}>{endpoint.state === 'healthy' ? '模拟故障' : '恢复节点'}</button><DeleteResourceButton kind="origins" id={endpoint.id} name={endpoint.name} compact /></div></section>)}
         </div>
       </div>
-      <Modal open={open} onOpenChange={setOpen} title="添加源站" description="添加 VPS 的连接地址、地理位置和初始流量权重。">
-        <form className="form-stack" onSubmit={submit}>
-          <Field label="源站名称"><input name="name" required autoFocus placeholder="Singapore · VPS 3" /></Field>
-          <Field label="IP 地址或主机名"><input name="address" required placeholder="203.0.113.10 或 origin.example.com" /></Field>
+      <Modal open={open} onOpenChange={setOpen} title={editing ? '编辑源站' : '添加源站'} description="设置 VPS 地址、Cloudflare 连接主机名、地理位置和流量权重。">
+        <form className="form-stack" onSubmit={submit} key={editing?.id ?? 'new-origin'}>
+          <Field label="源站名称"><input name="name" required autoFocus placeholder="Singapore · VPS 3" defaultValue={editing?.name} /></Field>
+          <Field label="IP 地址或主机名"><input name="address" required placeholder="203.0.113.10 或 origin.example.com" defaultValue={editing?.address} /></Field>
+          <Field label="连接主机名（自定义 Host 时必填）"><input name="connectionHost" placeholder="origin-1.example.com" defaultValue={editing?.connectionHost ?? ''} /><small className="field-help">使用同一 Cloudflare Zone 下指向该 VPS 的专用代理 DNS；不要填写业务域名或管理域名。</small></Field>
           <div className="field-row">
-            <Field label="区域"><input name="region" required placeholder="Asia Pacific" /></Field>
-            <Field label="权重"><input name="weight" type="number" required min="0" max="100" step="1" defaultValue="50" /></Field>
+            <Field label="区域"><input name="region" required placeholder="Asia Pacific" defaultValue={editing?.region} /></Field>
+            <Field label="权重"><input name="weight" type="number" required min="0" max="100" step="1" defaultValue={editing?.weight ?? 50} /></Field>
           </div>
           <div className="field-row">
-            <Field label="纬度"><input name="latitude" type="number" required min="-90" max="90" step="any" placeholder="1.3521" /></Field>
-            <Field label="经度"><input name="longitude" type="number" required min="-180" max="180" step="any" placeholder="103.8198" /></Field>
+            <Field label="纬度"><input name="latitude" type="number" required min="-90" max="90" step="any" placeholder="1.3521" defaultValue={editing?.coordinates.split(',')[0].trim()} /></Field>
+            <Field label="经度"><input name="longitude" type="number" required min="-180" max="180" step="any" placeholder="103.8198" defaultValue={editing?.coordinates.split(',')[1].trim()} /></Field>
           </div>
-          <p className="form-hint">坐标用于计算访客与 VPS 的距离；正式接入后，保存时会先执行一次健康检查。</p>
-          <ModalActions onCancel={() => setOpen(false)} submit="添加源站" />
+          <p className="form-hint">连接主机名只决定 Worker 实际连接哪台 VPS；监视器中的 Host 决定健康检查的虚拟主机。</p>
+          <ModalActions onCancel={() => setOpen(false)} submit={editing ? '保存更改' : '添加源站'} />
         </form>
       </Modal>
     </>

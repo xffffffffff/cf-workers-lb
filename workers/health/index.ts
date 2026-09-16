@@ -13,6 +13,7 @@ interface CheckRow {
   origin_id: string
   origin_name: string
   address: string
+  connection_host: string | null
   region: string
   latitude: number
   longitude: number
@@ -20,7 +21,9 @@ interface CheckRow {
   monitor_id: string
   monitor_name: string
   monitor_type: 'HTTP' | 'HTTPS' | 'TCP'
+  monitor_method: 'GET' | 'HEAD'
   monitor_path: string
+  monitor_port: number | null
   interval_seconds: number
   timeout_seconds: number
   expected_codes: string
@@ -35,13 +38,13 @@ interface CheckRow {
 }
 
 function asOrigin(row: CheckRow): SnapshotOrigin {
-  return { id: row.origin_id, name: row.origin_name, address: row.address, region: row.region, latitude: row.latitude, longitude: row.longitude, weight: row.weight }
+  return { id: row.origin_id, name: row.origin_name, address: row.address, connectionHost: row.connection_host, region: row.region, latitude: row.latitude, longitude: row.longitude, weight: row.weight }
 }
 
 function asMonitor(row: CheckRow): SnapshotMonitor {
   let headers: Record<string, string> = {}
   try { headers = JSON.parse(row.headers_json || '{}') as Record<string, string> } catch { /* Invalid legacy headers are ignored. */ }
-  return { id: row.monitor_id, name: row.monitor_name, type: row.monitor_type, path: row.monitor_path, intervalSeconds: row.interval_seconds, timeoutSeconds: row.timeout_seconds, expectedCodes: row.expected_codes, consecutiveFails: row.consecutive_fails, consecutiveSuccesses: row.consecutive_successes, headers, followRedirects: Boolean(row.follow_redirects) }
+  return { id: row.monitor_id, name: row.monitor_name, type: row.monitor_type, method: row.monitor_method, path: row.monitor_path, port: row.monitor_port, intervalSeconds: row.interval_seconds, timeoutSeconds: row.timeout_seconds, expectedCodes: row.expected_codes, consecutiveFails: row.consecutive_fails, consecutiveSuccesses: row.consecutive_successes, headers, followRedirects: Boolean(row.follow_redirects) }
 }
 
 function isDue(row: CheckRow, now: number) {
@@ -91,8 +94,8 @@ async function applyResult(env: Env, rows: CheckRow[], result: ProbeResult) {
 
 export async function runHealthChecks(env: Env) {
   const query = await env.DB.prepare(`
-    SELECT p.id AS pool_id, o.id AS origin_id, o.name AS origin_name, o.address, o.region, o.latitude, o.longitude, COALESCE(po.weight_override, o.weight) AS weight,
-      m.id AS monitor_id, m.name AS monitor_name, m.type AS monitor_type, m.path AS monitor_path, m.interval_seconds, m.timeout_seconds,
+    SELECT p.id AS pool_id, o.id AS origin_id, o.name AS origin_name, o.address, o.connection_host, o.region, o.latitude, o.longitude, COALESCE(po.weight_override, o.weight) AS weight,
+      m.id AS monitor_id, m.name AS monitor_name, m.type AS monitor_type, m.method AS monitor_method, m.path AS monitor_path, m.port AS monitor_port, m.interval_seconds, m.timeout_seconds,
       m.expected_codes, m.consecutive_fails, m.consecutive_successes, m.headers_json, m.follow_redirects,
       COALESCE(h.state, 'unknown') AS state, COALESCE(h.consecutive_failures, 0) AS current_failures,
       COALESCE(h.consecutive_successes, 0) AS current_successes, h.last_checked_at

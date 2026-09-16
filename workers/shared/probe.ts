@@ -1,5 +1,5 @@
 import { connect } from 'cloudflare:sockets'
-import type { SnapshotMonitor, SnapshotOrigin } from './model'
+import { originConnectionHost, type SnapshotMonitor, type SnapshotOrigin } from './model'
 
 export interface ProbeResult {
   ok: boolean
@@ -21,7 +21,7 @@ async function probeTcp(origin: SnapshotOrigin, monitor: SnapshotMonitor): Promi
   const started = Date.now()
   const parsed = new URL(`tcp://${origin.address}`)
   const portFromPath = Number(monitor.path)
-  const port = parsed.port ? Number(parsed.port) : Number.isInteger(portFromPath) && portFromPath > 0 ? portFromPath : 443
+  const port = monitor.port ?? (parsed.port ? Number(parsed.port) : Number.isInteger(portFromPath) && portFromPath > 0 ? portFromPath : 443)
   const hostname = parsed.hostname.replace(/^\[|\]$/g, '')
   let socket: Socket | undefined
   let timeout: ReturnType<typeof setTimeout> | undefined
@@ -49,11 +49,22 @@ export async function probeOrigin(origin: SnapshotOrigin, monitor: SnapshotMonit
   try {
     const protocol = monitor.type === 'HTTPS' ? 'https:' : 'http:'
     const path = monitor.path.startsWith('/') ? monitor.path : `/${monitor.path}`
-    const response = await fetch(`${protocol}//${origin.address}${path}`, {
-      method: 'GET',
-      headers: { 'User-Agent': 'Worker-LB-Health/1.0', ...monitor.headers },
+    const hostEntry = Object.entries(monitor.headers).find(([name]) => name.toLowerCase() === 'host')
+    const host = hostEntry?.[1]?.trim()
+    const resolveOverride = host ? originConnectionHost(origin) : null
+    if (host && !resolveOverride) throw new Error('自定义 Host 需要为源站设置连接主机名，不能直接使用 IP')
+    const originTarget = new URL(`${protocol}//${origin.address}`)
+    const target = new URL(`${protocol}//${host || origin.address}${path}`)
+    if (monitor.port !== null) target.port = String(monitor.port)
+    else if (host && originTarget.port) target.port = originTarget.port
+    const headers = new Headers({ 'User-Agent': 'Worker-LB-Health/1.0', ...monitor.headers })
+    if (hostEntry) headers.delete(hostEntry[0])
+    const response = await fetch(target, {
+      method: monitor.method,
+      headers,
       redirect: monitor.followRedirects ? 'follow' : 'manual',
       signal: controller.signal,
+      cf: resolveOverride ? { resolveOverride } : undefined,
     })
     const latencyMs = Date.now() - started
     return { ok: expectedStatus(monitor.expectedCodes, response.status), statusCode: response.status, latencyMs, error: expectedStatus(monitor.expectedCodes, response.status) ? null : `状态码 ${response.status} 不符合 ${monitor.expectedCodes}` }

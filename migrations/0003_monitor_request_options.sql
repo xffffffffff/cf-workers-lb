@@ -1,0 +1,4 @@
+ALTER TABLE monitors ADD COLUMN method TEXT NOT NULL DEFAULT 'GET' CHECK (method IN ('GET', 'HEAD'));
+ALTER TABLE monitors ADD COLUMN port INTEGER CHECK (port BETWEEN 1 AND 65535);
+
+ALTER TABLE load_balancers ADD COLUMN origin_host TEXT;

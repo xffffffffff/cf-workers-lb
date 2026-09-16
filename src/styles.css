@@ -234,6 +234,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .monitor-icon, .pool-emblem { display: grid; width: 36px; height: 36px; place-items: center; border-radius: 11px; background: var(--accent-soft); color: var(--accent); }
 .monitor-card h2, .pool-card h2 { margin-top: 18px; font-size: 14px; }
 .monitor-card > p, .pool-card > p, .origin-detail-heading p, .settings-card p { margin: 6px 0 0; color: var(--text-tertiary); font-size: 10px; line-height: 1.5; }
+.monitor-card > .monitor-host { overflow: hidden; color: var(--text-secondary); text-overflow: ellipsis; white-space: nowrap; }
 .mini-kv { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 18px 0; }
 .mini-kv > span { display: flex; min-width: 0; flex-direction: column; gap: 4px; border-radius: 10px; background: var(--surface-raised); padding: 9px; color: var(--text-tertiary); font-size: 9px; }
 .mini-kv strong { overflow: hidden; color: var(--text-primary); font-size: 10px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
@@ -325,6 +326,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .domain-provision-note code { font: 600 9px/1.2 inherit; }
 .field-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 .field { display: flex; min-width: 0; flex-direction: column; gap: 6px; color: var(--text-secondary); font-size: 10px; font-weight: 550; }
+.field-help { color: var(--text-tertiary); font-size: 9px; font-weight: 450; line-height: 1.5; }
 .field input, .field select, .field textarea { width: 100%; min-height: 38px; border: 1px solid var(--border); border-radius: 10px; outline: 0; background: var(--surface); padding: 0 11px; color: var(--text-primary); font-size: 11px; font-weight: 450; transition: border-color 140ms ease, background-color 140ms ease; }
 .field textarea { min-height: 76px; resize: vertical; padding-top: 10px; }
 .field input:focus, .field select:focus, .field textarea:focus { border-color: var(--accent); background: var(--surface-raised); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent); }

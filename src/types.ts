@@ -6,6 +6,7 @@ export interface Endpoint {
   id: string
   name: string
   address: string
+  connectionHost?: string | null
   region: string
   coordinates: string
   latency: number
@@ -18,10 +19,16 @@ export interface Monitor {
   id: string
   name: string
   type: 'HTTPS' | 'HTTP' | 'TCP'
+  method: 'GET' | 'HEAD'
   path: string
+  port: number | null
   interval: number
   timeout: number
   expected: string
+  consecutiveFails: number
+  consecutiveSuccesses: number
+  headers: Record<string, string>
+  followRedirects: boolean
   pools: number
   state: HealthState
 }
@@ -39,6 +46,7 @@ export interface Pool {
 export interface LoadBalancer {
   id: string
   hostname: string
+  originHost?: string | null
   site: string
   pools: string[]
   steering: '邻近感知' | '动态延迟' | '随机' | '故障转移'

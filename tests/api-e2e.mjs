@@ -28,13 +28,18 @@ assert.equal(cloudflareTest.ok, true)
 
 const origin = await request('/api/origins', {
   method: 'POST',
-  body: JSON.stringify({ name: `Test VPS ${suffix}`, address: `origin-${suffix}.example.net`, region: 'Test Region', latitude: 40.7, longitude: -74, weight: 50 }),
+  body: JSON.stringify({ name: `Test VPS ${suffix}`, address: `origin-${suffix}.example.net`, connectionHost: `connect-${suffix}.example.net`, region: 'Test Region', latitude: 40.7, longitude: -74, weight: 50 }),
 }, 201)
 
 const monitor = await request('/api/monitors', {
   method: 'POST',
-  body: JSON.stringify({ name: `Test Monitor ${suffix}`, type: 'HTTPS', path: '/healthz', interval: 60, timeout: 3, expected: '200-299' }),
+  body: JSON.stringify({ name: `Test Monitor ${suffix}`, type: 'HTTPS', method: 'GET', path: '/healthz', port: 443, interval: 60, timeout: 3, expected: '200-299', consecutiveFails: 3, consecutiveSuccesses: 1, headers: { Host: `health-${suffix}.example.net`, 'X-Health-Check': 'worker-lb' }, followRedirects: false }),
 }, 201)
+
+await request(`/api/monitors/${monitor.id}`, {
+  method: 'PATCH',
+  body: JSON.stringify({ headers: { Host: `updated-${suffix}.example.net` }, port: null, followRedirects: true }),
+})
 
 const pool = await request('/api/pools', {
   method: 'POST',
@@ -49,17 +54,23 @@ assert.match(adminDomainConflict.error, /管理界面域名/)
 
 const loadBalancer = await request('/api/load-balancers', {
   method: 'POST',
-  body: JSON.stringify({ hostname: `test-${suffix}.example.com`, site: 'Integration Test', steering: 'proximity', sessionAffinity: true, pools: [pool.id] }),
+  body: JSON.stringify({ hostname: `test-${suffix}.example.com`, originHost: `backend-${suffix}.example.net`, site: 'Integration Test', steering: 'proximity', sessionAffinity: true, pools: [pool.id] }),
 }, 201)
 
 const state = await request('/api/state')
 assert.equal(state.meta.cloudflare.configured, true)
 assert.ok(!JSON.stringify(state).includes(testCloudflareToken), '控制状态不得包含 Cloudflare Token 明文')
 assert.ok(state.origins.some((item) => item.id === origin.id))
+assert.equal(state.origins.find((item) => item.id === origin.id).connectionHost, `connect-${suffix}.example.net`)
 assert.ok(state.monitors.some((item) => item.id === monitor.id))
+const savedMonitor = state.monitors.find((item) => item.id === monitor.id)
+assert.equal(savedMonitor.headers.Host, `updated-${suffix}.example.net`)
+assert.equal(savedMonitor.port, null)
+assert.equal(savedMonitor.followRedirects, true)
 assert.ok(state.pools.some((item) => item.id === pool.id))
 const savedLoadBalancer = state.loadBalancers.find((item) => item.id === loadBalancer.id)
 assert.ok(savedLoadBalancer)
+assert.equal(savedLoadBalancer.originHost, `backend-${suffix}.example.net`)
 assert.equal(savedLoadBalancer.domain.zone, 'example.com')
 assert.equal(savedLoadBalancer.domain.routePattern, `test-${suffix}.example.com/*`)
 assert.equal(savedLoadBalancer.domain.routeManaged, true)
