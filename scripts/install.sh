@@ -104,26 +104,99 @@ fi
 
 PROVISION_CONFIG=".wrangler.generated.provision.toml"
 
-if [[ ! -f "$PROVISION_CONFIG" ]]; then
+PROVISION_CONFIG_EXISTED=0
+if [[ -f "$PROVISION_CONFIG" ]]; then
+  PROVISION_CONFIG_EXISTED=1
+  PROVISIONED_PREFIX="$(sed -nE 's/^[[:space:]]*name[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' "$PROVISION_CONFIG" | head -1)"
+  if [[ -n "$PROVISIONED_PREFIX" && "$PROVISIONED_PREFIX" != "$PREFIX" ]]; then
+    echo "This checkout was provisioned as '$PROVISIONED_PREFIX'; rerun with --name $PROVISIONED_PREFIX or use a fresh clone." >&2
+    exit 1
+  fi
+else
   cat > "$PROVISION_CONFIG" <<EOF
 name = "$PREFIX"
 main = "workers/unified/index.ts"
 compatibility_date = "2026-09-15"
 EOF
-
-  echo "[3/6] Creating D1 database and KV namespace"
-  npx wrangler d1 create "$PREFIX" --binding DB --update-config --config "$PROVISION_CONFIG"
-  npx wrangler kv namespace create "$PREFIX-config" --binding CONFIG_KV --update-config --config "$PROVISION_CONFIG"
-else
-  echo "[3/6] Reusing existing D1 database and KV namespace"
 fi
 
-DB_ID="$(sed -nE 's/^[[:space:]]*database_id[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' "$PROVISION_CONFIG" | head -1)"
-KV_ID="$(sed -nE 's/^[[:space:]]*id[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' "$PROVISION_CONFIG" | tail -1)"
-if [[ -z "$DB_ID" || -z "$KV_ID" ]]; then
-  echo "Could not read generated D1/KV identifiers from $PROVISION_CONFIG." >&2
+DB_ID="${WORKER_LB_DB_ID:-$(sed -nE 's/^[[:space:]]*database_id[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' "$PROVISION_CONFIG" | head -1)}"
+KV_ID="${WORKER_LB_KV_ID:-$(sed -nE 's/^[[:space:]]*id[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' "$PROVISION_CONFIG" | tail -1)}"
+
+find_existing_d1() {
+  npx wrangler d1 list --json --config "$PROVISION_CONFIG" | node -e '
+    let input = "";
+    process.stdin.on("data", (chunk) => { input += chunk });
+    process.stdin.on("end", () => {
+      const matches = JSON.parse(input).filter((item) => item.name === process.argv[1]);
+      if (matches.length === 1) process.stdout.write(String(matches[0].uuid ?? matches[0].id ?? ""));
+      if (matches.length > 1) process.stdout.write("AMBIGUOUS");
+    });
+  ' "$PREFIX"
+}
+
+find_existing_kv() {
+  npx wrangler kv namespace list --config "$PROVISION_CONFIG" | node -e '
+    let input = "";
+    process.stdin.on("data", (chunk) => { input += chunk });
+    process.stdin.on("end", () => {
+      const matches = JSON.parse(input).filter((item) => item.title === process.argv[1]);
+      if (matches.length === 1) process.stdout.write(String(matches[0].id ?? ""));
+      if (matches.length > 1) process.stdout.write("AMBIGUOUS");
+    });
+  ' "$PREFIX-config"
+}
+
+if [[ "$PROVISION_CONFIG_EXISTED" -eq 1 && -z "$DB_ID" ]]; then
+  DB_ID="$(find_existing_d1)"
+fi
+if [[ "$PROVISION_CONFIG_EXISTED" -eq 1 && -z "$KV_ID" ]]; then
+  KV_ID="$(find_existing_kv)"
+fi
+if [[ "$DB_ID" == "AMBIGUOUS" || "$KV_ID" == "AMBIGUOUS" ]]; then
+  echo "Found multiple resources with the generated name. Set WORKER_LB_DB_ID and WORKER_LB_KV_ID explicitly." >&2
   exit 1
 fi
+
+if [[ -z "$DB_ID" ]]; then
+  echo "[3/6] Creating D1 database"
+  D1_OUTPUT="$(npx wrangler d1 create "$PREFIX" --binding DB --config "$PROVISION_CONFIG")"
+  printf '%s\n' "$D1_OUTPUT"
+  DB_ID="$(printf '%s\n' "$D1_OUTPUT" | sed -nE 's/.*database_id[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' | head -1)"
+  [[ -n "$DB_ID" ]] || DB_ID="$(find_existing_d1)"
+else
+  echo "[3/6] Reusing D1 database $DB_ID"
+fi
+
+if [[ -z "$KV_ID" ]]; then
+  echo "[3/6] Creating KV namespace"
+  KV_OUTPUT="$(npx wrangler kv namespace create "$PREFIX-config" --binding CONFIG_KV --config "$PROVISION_CONFIG")"
+  printf '%s\n' "$KV_OUTPUT"
+  KV_ID="$(printf '%s\n' "$KV_OUTPUT" | sed -nE 's/.*id[[:space:]]*=[[:space:]]*"([a-fA-F0-9]+)".*/\1/p' | tail -1)"
+  [[ -n "$KV_ID" ]] || KV_ID="$(find_existing_kv)"
+else
+  echo "[3/6] Reusing KV namespace $KV_ID"
+fi
+
+if [[ ! "$DB_ID" =~ ^[a-fA-F0-9-]{36}$ || ! "$KV_ID" =~ ^[a-fA-F0-9]{32}$ ]]; then
+  echo "Could not resolve generated D1/KV identifiers. Set WORKER_LB_DB_ID and WORKER_LB_KV_ID, then rerun." >&2
+  exit 1
+fi
+
+cat > "$PROVISION_CONFIG" <<EOF
+name = "$PREFIX"
+main = "workers/unified/index.ts"
+compatibility_date = "2026-09-15"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "$PREFIX"
+database_id = "$DB_ID"
+
+[[kv_namespaces]]
+binding = "CONFIG_KV"
+id = "$KV_ID"
+EOF
 
 ACCESS_VARS=""
 if [[ -n "$ACCESS_TEAM_DOMAIN" ]]; then

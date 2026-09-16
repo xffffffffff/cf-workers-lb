@@ -36,6 +36,8 @@ git clone https://github.com/xffffffffff/cf-workers-lb.git && cd cf-workers-lb &
 
 重复运行安装命令会复用已经创建的 D1/KV 和密钥，并自动沿用上次的管理域名。如需更换，再次传入 `--admin-host new.example.com`；如需解除管理 Custom Domain，使用 `--no-admin-host`。
 
+如果资源已在 Cloudflare 创建，但安装在写入本地资源 ID 前中断，重新运行脚本会按精确名称找回并复用这些资源。也可通过 `WORKER_LB_DB_ID` 和 `WORKER_LB_KV_ID` 显式指定已创建的资源。同一克隆目录重新运行时必须使用相同的 `--name`；如需另一套资源，请使用新的克隆目录。
+
 更新已经克隆的项目：
 
 ```bash
