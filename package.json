@@ -3,12 +3,16 @@
   "private": true,
   "version": "0.1.0",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/xffffffffff/cf-workers-lb.git"
+  },
+  "homepage": "https://github.com/xffffffffff/cf-workers-lb#readme",
+  "bugs": "https://github.com/xffffffffff/cf-workers-lb/issues",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "dev:cloudflare": "wrangler dev --config wrangler.local.toml",
-    "dev:health": "wrangler dev --config wrangler.health.local.toml",
-    "dev:traffic": "wrangler dev --config wrangler.traffic.local.toml",
     "db:local:migrate": "wrangler d1 migrations apply worker-lb-local --local --config wrangler.local.toml",
     "test:api": "node tests/api-e2e.mjs",
     "test:full": "node tests/full-e2e.mjs",

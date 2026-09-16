@@ -1,6 +1,9 @@
 name = "worker-lb-local"
-main = "workers/control/index.ts"
+main = "workers/unified/index.ts"
 compatibility_date = "2026-09-15"
+
+[triggers]
+crons = ["* * * * *"]
 
 [assets]
 directory = "./dist"
@@ -20,3 +23,8 @@ id = "00000000000000000000000000000001"
 
 [vars]
 ENVIRONMENT = "development"
+WORKER_NAME = "worker-lb-local"
+AFFINITY_SECRET = "local-development-affinity-secret-change-me"
+TOKEN_ENCRYPTION_KEY = "local-development-token-encryption-key-change-me"
+CONFIG_CACHE_SECONDS = "1"
+REQUEST_LOG_SAMPLE_RATE = "1"

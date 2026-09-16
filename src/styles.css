@@ -128,9 +128,14 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .button-danger { background: var(--red-bg); color: var(--red); box-shadow: none; }
 .button-compact { min-height: 32px; padding: 0 10px; }
 .button:active { transform: scale(.97); }
+.button:disabled { cursor: not-allowed; opacity: .48; transform: none; }
 
 .page-intro { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 18px; }
 .page-intro > p { max-width: 720px; margin: 0; color: var(--text-secondary); font-size: 13px; line-height: 1.55; }
+.connection-notice { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 12px; margin: -4px 0 14px; border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--border)); border-radius: 14px; background: var(--accent-soft); padding: 12px; }
+.connection-notice-icon { display: grid; width: 34px; height: 34px; place-items: center; border-radius: 10px; background: var(--surface-raised); color: var(--accent); box-shadow: var(--shadow-xs); }
+.connection-notice strong { display: block; font-size: 11px; font-weight: 650; }
+.connection-notice p { margin: 3px 0 0; color: var(--text-secondary); font-size: 10px; line-height: 1.5; }
 .segmented { display: flex; width: max-content; gap: 2px; border-radius: 10px; background: var(--surface); padding: 3px; }
 .segmented button { min-height: 29px; border: 0; border-radius: 8px; background: transparent; padding: 0 10px; color: var(--text-tertiary); cursor: pointer; font-size: 11px; font-weight: 500; }
 .segmented button.is-active { background: var(--surface-raised); color: var(--text-primary); box-shadow: var(--shadow-xs); }
@@ -294,6 +299,20 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .settings-row > span:first-child { display: flex; flex-direction: column; gap: 4px; }
 .settings-row strong { font-size: 11px; font-weight: 600; }
 .settings-row small { color: var(--text-tertiary); font-size: 9px; line-height: 1.45; }
+.cloudflare-token-card { border: 1px solid color-mix(in srgb, var(--accent) 18%, var(--border)); }
+.token-permissions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 0 0 14px; }
+.token-permissions > span { margin-right: 2px; color: var(--text-tertiary); font-size: 9px; }
+.token-permissions code { border-radius: 7px; background: var(--accent-soft); padding: 4px 7px; color: var(--accent); font: 600 9px/1.2 inherit; }
+.token-form { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 10px; border-top: 1px solid var(--border); padding-top: 14px; }
+.token-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 7px; }
+.token-actions a { text-decoration: none; }
+.token-security-note { margin-top: 12px !important; }
+.token-route-warning { border-radius: 10px; background: var(--amber-bg); padding: 9px 10px; color: var(--amber) !important; }
+.domain-status { display: inline-flex; align-items: center; gap: 6px; color: var(--text-tertiary); font-size: 10px; font-weight: 600; white-space: nowrap; }
+.domain-status > span { width: 7px; height: 7px; border-radius: 50%; background: var(--text-tertiary); box-shadow: 0 0 0 3px color-mix(in srgb, var(--text-tertiary) 12%, transparent); }
+.domain-status.is-connected { color: var(--green); }
+.domain-status.is-connected > span { background: var(--green); box-shadow: 0 0 0 3px color-mix(in srgb, var(--green) 14%, transparent); }
+.domain-zone { display: block; margin-top: 3px; color: var(--text-tertiary); font-size: 9px; white-space: nowrap; }
 
 .dialog-backdrop { position: fixed; inset: 0; z-index: 100; background: rgba(11, 13, 18, .45); backdrop-filter: blur(2px); transition: opacity 180ms var(--ease-out); }
 .dialog-popup { position: fixed; top: 50%; left: 50%; z-index: 101; width: min(520px, calc(100vw - 32px)); max-height: calc(100vh - 40px); overflow-y: auto; transform: translate(-50%, -50%) scale(1); border: 1px solid var(--border); border-radius: 18px; background: var(--surface-raised); padding: 18px; color: var(--text-primary); box-shadow: var(--shadow-dialog); transition: transform 220ms var(--ease-out), opacity 180ms var(--ease-out); }
@@ -304,6 +323,11 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .dialog-description { margin: 5px 0 0; color: var(--text-secondary); font-size: 10px; line-height: 1.5; }
 .dialog-close { width: 32px; height: 32px; border-radius: 9px; background: var(--surface); color: var(--text-secondary); }
 .form-stack { display: flex; flex-direction: column; gap: 14px; }
+.domain-provision-note { display: flex; align-items: flex-start; gap: 10px; border-radius: 12px; background: var(--accent-soft); padding: 11px; color: var(--accent); }
+.domain-provision-note > svg { flex: 0 0 auto; margin-top: 1px; }
+.domain-provision-note strong { display: block; font-size: 10px; font-weight: 650; }
+.domain-provision-note p { margin: 4px 0 0; color: var(--text-secondary); font-size: 9px; line-height: 1.55; }
+.domain-provision-note code { font: 600 9px/1.2 inherit; }
 .field-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 .field { display: flex; min-width: 0; flex-direction: column; gap: 6px; color: var(--text-secondary); font-size: 10px; font-weight: 550; }
 .field input, .field select, .field textarea { width: 100%; min-height: 38px; border: 1px solid var(--border); border-radius: 10px; outline: 0; background: var(--surface); padding: 0 11px; color: var(--text-primary); font-size: 11px; font-weight: 450; transition: border-color 140ms ease, background-color 140ms ease; }
@@ -369,6 +393,8 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   .header-actions .button-primary::after { content: '发布'; font-size: 10px; }
   .page-intro { align-items: flex-start; flex-direction: column; }
   .page-intro > .button { align-self: stretch; }
+  .connection-notice { grid-template-columns: auto minmax(0, 1fr); }
+  .connection-notice > .button { grid-column: 1 / -1; }
   .stat-grid, .monitor-grid, .pool-grid, .origin-detail-stack { grid-template-columns: 1fr; }
   .stat-card { min-height: 104px; }
   .request-chart-card, .latency-card, .split-card { padding-inline: 13px; }
@@ -379,6 +405,8 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   .data-toolbar-controls { width: 100%; }
   .search-field { min-width: 0; flex: 1; }
   .field-row { grid-template-columns: 1fr; }
+  .token-form { grid-template-columns: 1fr; }
+  .token-actions { justify-content: flex-start; }
   .dialog-popup { padding: 16px; }
   .modal-actions { margin-right: -16px; margin-bottom: -16px; margin-left: -16px; padding-right: 16px; padding-left: 16px; }
   .proximity-map-card { min-height: 440px; }

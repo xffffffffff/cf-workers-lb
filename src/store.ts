@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import { apiRequest, ApiError, getControlState, setAdminToken, type ControlState } from './api'
 import { seedEndpoints, seedLoadBalancers, seedLogs, seedMonitors, seedPools, trafficData } from './data'
-import type { Endpoint, LoadBalancer, LogEntry, Monitor, Pool, ViewId } from './types'
+import type { CloudflareConnection, Endpoint, LoadBalancer, LogEntry, Monitor, Pool, ViewId } from './types'
 
 type BackendState = 'loading' | 'connected' | 'unauthorized' | 'demo'
 export type ResourceKind = 'load-balancers' | 'monitors' | 'pools' | 'origins'
@@ -12,6 +12,7 @@ interface ControlPlaneState {
   sidebarOpen: boolean
   backend: BackendState
   publishedVersion: number | null
+  cloudflare: CloudflareConnection
   endpoints: Endpoint[]
   monitors: Monitor[]
   pools: Pool[]
@@ -33,6 +34,9 @@ interface ControlPlaneState {
   togglePool: (id: string) => Promise<void>
   toggleEndpointHealth: (id: string) => Promise<void>
   testMonitor: (monitorId: string) => Promise<{ ok: boolean; latencyMs: number }>
+  saveCloudflareToken: (token: string) => Promise<{ zoneCount: number }>
+  testCloudflareToken: () => Promise<{ zoneCount: number; zones: string[] }>
+  removeCloudflareToken: () => Promise<void>
   deleteResource: (kind: ResourceKind, id: string) => Promise<void>
 }
 
@@ -46,6 +50,7 @@ function remotePayload(state: ControlState) {
     traffic: state.analytics.traffic,
     failovers: state.analytics.failovers,
     publishedVersion: state.meta.publishedVersion,
+    cloudflare: state.meta.cloudflare,
     backend: 'connected' as const,
   }
 }
@@ -60,6 +65,7 @@ export const useControlPlane = create<ControlPlaneState>((set, get) => ({
   sidebarOpen: false,
   backend: 'loading',
   publishedVersion: null,
+  cloudflare: { configured: false, tokenHint: null, verifiedAt: null },
   endpoints: seedEndpoints,
   monitors: seedMonitors,
   pools: seedPools,
@@ -160,6 +166,21 @@ export const useControlPlane = create<ControlPlaneState>((set, get) => ({
       return { ok: true, latencyMs: origin.latency }
     }
     return apiRequest('/api/monitors/test', { method: 'POST', body: JSON.stringify({ monitorId, originId: origin.id }) })
+  },
+  saveCloudflareToken: async (token) => {
+    if (get().backend !== 'connected') throw new Error('请先连接已部署的管理控制面')
+    const result = await apiRequest<{ zoneCount: number }>('/api/cloudflare/token', { method: 'PUT', body: JSON.stringify({ token }) })
+    await get().refresh()
+    return result
+  },
+  testCloudflareToken: async () => {
+    if (get().backend !== 'connected') throw new Error('请先连接已部署的管理控制面')
+    return apiRequest<{ zoneCount: number; zones: string[] }>('/api/cloudflare/test', { method: 'POST', body: '{}' })
+  },
+  removeCloudflareToken: async () => {
+    if (get().backend !== 'connected') throw new Error('请先连接已部署的管理控制面')
+    await apiRequest('/api/cloudflare/token', { method: 'DELETE' })
+    await get().refresh()
   },
   deleteResource: async (kind, id) => {
     if (get().backend === 'connected') {

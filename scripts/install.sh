@@ -5,10 +5,9 @@ PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_DIR"
 
 PREFIX="worker-lb"
-ROUTES=""
 ACCESS_TEAM_DOMAIN=""
 ACCESS_AUD=""
-NON_INTERACTIVE=0
+ADMIN_HOST=""
 
 usage() {
   cat <<'USAGE'
@@ -19,24 +18,24 @@ Usage:
 
 Options:
   --name PREFIX                 Worker/resource name prefix (default: worker-lb)
-  --routes HOSTS                Comma-separated load-balanced hostnames
-                                Example: www.example.com,api.example.com
-  --access-team-domain DOMAIN   Cloudflare Access team domain, e.g. team.cloudflareaccess.com
-  --access-aud AUD              Cloudflare Access application audience tag
-  --yes                         Do not prompt for routes; deploy without routes when omitted
-  -h, --help                    Show this help
+  --admin-host HOSTNAME        Optional custom hostname that may serve the WebUI/API
+  --access-team-domain DOMAIN  Cloudflare Access team domain, e.g. team.cloudflareaccess.com
+  --access-aud AUD             Cloudflare Access application audience tag
+  -h, --help                   Show this help
 
-The script reuses .wrangler.generated.provision.toml on subsequent runs.
+No traffic domain is required during installation. Add Cloudflare API credentials
+and load-balanced hostnames later from the WebUI.
+
+The script reuses generated D1, KV, and secret files on subsequent runs.
 USAGE
 }
 
 while (($#)); do
   case "$1" in
     --name) PREFIX="${2:?Missing value for --name}"; shift 2 ;;
-    --routes) ROUTES="${2:?Missing value for --routes}"; shift 2 ;;
+    --admin-host) ADMIN_HOST="${2:?Missing value for --admin-host}"; shift 2 ;;
     --access-team-domain) ACCESS_TEAM_DOMAIN="${2:?Missing value for --access-team-domain}"; shift 2 ;;
     --access-aud) ACCESS_AUD="${2:?Missing value for --access-aud}"; shift 2 ;;
-    --yes) NON_INTERACTIVE=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -47,18 +46,10 @@ if [[ ! "$PREFIX" =~ ^[a-z0-9][a-z0-9-]{1,40}$ ]]; then
   exit 2
 fi
 
-command -v node >/dev/null || { echo "Node.js 20+ is required." >&2; exit 1; }
-command -v npm >/dev/null || { echo "npm is required." >&2; exit 1; }
-NODE_MAJOR="$(node -p 'Number(process.versions.node.split(".")[0])')"
-if (( NODE_MAJOR < 20 )); then
-  echo "Node.js 20+ is required; found $(node --version)." >&2
-  exit 1
+if [[ -n "$ADMIN_HOST" && ! "$ADMIN_HOST" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]]; then
+  echo "Invalid --admin-host hostname." >&2
+  exit 2
 fi
-
-if [[ -z "$ROUTES" && "$NON_INTERACTIVE" -eq 0 && -t 0 ]]; then
-  read -r -p "Load-balanced hostnames, comma separated (blank to configure later): " ROUTES
-fi
-
 if [[ -n "$ACCESS_TEAM_DOMAIN" && ! "$ACCESS_TEAM_DOMAIN" =~ ^[a-zA-Z0-9.-]+$ ]]; then
   echo "Invalid Cloudflare Access team domain." >&2
   exit 2
@@ -67,70 +58,62 @@ if [[ -n "$ACCESS_AUD" && ! "$ACCESS_AUD" =~ ^[a-zA-Z0-9_-]+$ ]]; then
   echo "Invalid Cloudflare Access audience tag." >&2
   exit 2
 fi
+if [[ -n "$ACCESS_TEAM_DOMAIN" || -n "$ACCESS_AUD" ]]; then
+  if [[ -z "$ACCESS_TEAM_DOMAIN" || -z "$ACCESS_AUD" ]]; then
+    echo "Both --access-team-domain and --access-aud are required together." >&2
+    exit 2
+  fi
+fi
 
-echo "[1/8] Installing dependencies and building WebUI"
+command -v node >/dev/null || { echo "Node.js 20+ is required." >&2; exit 1; }
+command -v npm >/dev/null || { echo "npm is required." >&2; exit 1; }
+command -v openssl >/dev/null || { echo "openssl is required to generate secrets." >&2; exit 1; }
+NODE_MAJOR="$(node -p 'Number(process.versions.node.split(".")[0])')"
+if (( NODE_MAJOR < 20 )); then
+  echo "Node.js 20+ is required; found $(node --version)." >&2
+  exit 1
+fi
+
+echo "[1/6] Installing dependencies and building WebUI"
 npm install
 npm run check
 npm run build
 
-echo "[2/8] Checking Cloudflare authentication"
+echo "[2/6] Checking Cloudflare authentication"
 if ! npx wrangler whoami >/dev/null 2>&1; then
   if [[ -n "${CLOUDFLARE_API_TOKEN:-}" ]]; then
-    echo "Cloudflare API token authentication failed." >&2
+    echo "Cloudflare deployment token authentication failed." >&2
     exit 1
   fi
   npx wrangler login
 fi
 
 PROVISION_CONFIG=".wrangler.generated.provision.toml"
-CONTROL_CONFIG=".wrangler.generated.control.toml"
-HEALTH_CONFIG=".wrangler.generated.health.toml"
-TRAFFIC_CONFIG=".wrangler.generated.traffic.toml"
+WORKER_CONFIG=".wrangler.generated.toml"
 
 if [[ ! -f "$PROVISION_CONFIG" ]]; then
   cat > "$PROVISION_CONFIG" <<EOF
-name = "$PREFIX-control"
-main = "workers/control/index.ts"
+name = "$PREFIX"
+main = "workers/unified/index.ts"
 compatibility_date = "2026-09-15"
 EOF
 
-  echo "[3/8] Creating D1 database"
+  echo "[3/6] Creating D1 database and KV namespace"
   npx wrangler d1 create "$PREFIX" --binding DB --update-config --config "$PROVISION_CONFIG"
-  echo "[4/8] Creating KV namespace"
   npx wrangler kv namespace create "$PREFIX-config" --binding CONFIG_KV --update-config --config "$PROVISION_CONFIG"
 else
-  echo "[3/8] Reusing existing D1 database"
-  echo "[4/8] Reusing existing KV namespace"
+  echo "[3/6] Reusing existing D1 database and KV namespace"
 fi
 
 DB_ID="$(sed -nE 's/^[[:space:]]*database_id[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' "$PROVISION_CONFIG" | head -1)"
 KV_ID="$(sed -nE 's/^[[:space:]]*id[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' "$PROVISION_CONFIG" | tail -1)"
 if [[ -z "$DB_ID" || -z "$KV_ID" ]]; then
-  echo "Could not read the generated D1/KV identifiers from $PROVISION_CONFIG." >&2
+  echo "Could not read generated D1/KV identifiers from $PROVISION_CONFIG." >&2
   exit 1
 fi
 
-ROUTES_TOML=""
-if [[ -n "$ROUTES" ]]; then
-  IFS=',' read -r -a HOSTS <<< "$ROUTES"
-  ROUTE_ITEMS=()
-  for raw_host in "${HOSTS[@]}"; do
-    host="$(printf '%s' "$raw_host" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
-    if [[ ! "$host" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]]; then
-      echo "Invalid route hostname: $host" >&2
-      exit 2
-    fi
-    ROUTE_ITEMS+=("\"$host/*\"")
-  done
-  ROUTES_TOML="routes = [$(IFS=,; echo "${ROUTE_ITEMS[*]}")]"
-fi
-
 ACCESS_VARS=""
-if [[ -n "$ACCESS_TEAM_DOMAIN" || -n "$ACCESS_AUD" ]]; then
-  if [[ -z "$ACCESS_TEAM_DOMAIN" || -z "$ACCESS_AUD" ]]; then
-    echo "Both --access-team-domain and --access-aud are required together." >&2
-    exit 2
-  fi
+if [[ -n "$ACCESS_TEAM_DOMAIN" ]]; then
   ACCESS_VARS=$(cat <<EOF
 ACCESS_TEAM_DOMAIN = "$ACCESS_TEAM_DOMAIN"
 ACCESS_AUD = "$ACCESS_AUD"
@@ -138,9 +121,9 @@ EOF
 )
 fi
 
-cat > "$CONTROL_CONFIG" <<EOF
-name = "$PREFIX-control"
-main = "workers/control/index.ts"
+cat > "$WORKER_CONFIG" <<EOF
+name = "$PREFIX"
+main = "workers/unified/index.ts"
 compatibility_date = "2026-09-15"
 
 [assets]
@@ -148,6 +131,9 @@ directory = "./dist"
 binding = "ASSETS"
 not_found_handling = "single-page-application"
 run_worker_first = true
+
+[triggers]
+crons = ["* * * * *"]
 
 [[d1_databases]]
 binding = "DB"
@@ -161,89 +147,50 @@ id = "$KV_ID"
 
 [vars]
 ENVIRONMENT = "production"
+WORKER_NAME = "$PREFIX"
+ADMIN_HOSTS = "$ADMIN_HOST"
+CONFIG_CACHE_SECONDS = "5"
+REQUEST_LOG_SAMPLE_RATE = "0.01"
 $ACCESS_VARS
 EOF
 
-cat > "$HEALTH_CONFIG" <<EOF
-name = "$PREFIX-health"
-main = "workers/health/index.ts"
-compatibility_date = "2026-09-15"
+echo "[4/6] Applying D1 migrations"
+npx wrangler d1 migrations apply "$PREFIX" --remote --config "$WORKER_CONFIG"
 
-[triggers]
-crons = ["* * * * *"]
-
-[[d1_databases]]
-binding = "DB"
-database_name = "$PREFIX"
-database_id = "$DB_ID"
-
-[[kv_namespaces]]
-binding = "CONFIG_KV"
-id = "$KV_ID"
-
-[vars]
-ENVIRONMENT = "production"
-EOF
-
-cat > "$TRAFFIC_CONFIG" <<EOF
-name = "$PREFIX-traffic"
-main = "workers/traffic/index.ts"
-compatibility_date = "2026-09-15"
-$ROUTES_TOML
-
-[[d1_databases]]
-binding = "DB"
-database_name = "$PREFIX"
-database_id = "$DB_ID"
-
-[[kv_namespaces]]
-binding = "CONFIG_KV"
-id = "$KV_ID"
-
-[vars]
-CONFIG_CACHE_SECONDS = "5"
-REQUEST_LOG_SAMPLE_RATE = "0.01"
-EOF
-
-echo "[5/8] Applying D1 migrations"
-npx wrangler d1 migrations apply "$PREFIX" --remote --config "$CONTROL_CONFIG"
-
-command -v openssl >/dev/null || { echo "openssl is required to generate secrets." >&2; exit 1; }
 SECRETS_FILE=".wrangler.generated.secrets"
 if [[ -f "$SECRETS_FILE" ]]; then
   # This file is generated locally by this installer and is never committed.
   source "$SECRETS_FILE"
-else
-  ADMIN_TOKEN="wlb_$(openssl rand -hex 24)"
-  AFFINITY_SECRET="$(openssl rand -hex 32)"
-  umask 077
-  cat > "$SECRETS_FILE" <<EOF
+fi
+ADMIN_TOKEN="${ADMIN_TOKEN:-wlb_$(openssl rand -hex 24)}"
+AFFINITY_SECRET="${AFFINITY_SECRET:-$(openssl rand -hex 32)}"
+TOKEN_ENCRYPTION_KEY="${TOKEN_ENCRYPTION_KEY:-$(openssl rand -hex 32)}"
+umask 077
+cat > "$SECRETS_FILE" <<EOF
 ADMIN_TOKEN='$ADMIN_TOKEN'
 AFFINITY_SECRET='$AFFINITY_SECRET'
+TOKEN_ENCRYPTION_KEY='$TOKEN_ENCRYPTION_KEY'
 EOF
-fi
 
-echo "[6/8] Deploying control Worker and UI"
-npx wrangler deploy --config "$CONTROL_CONFIG"
-printf '%s' "$ADMIN_TOKEN" | npx wrangler secret put ADMIN_TOKEN --config "$CONTROL_CONFIG"
+echo "[5/6] Deploying unified Worker, WebUI, and Cron"
+npx wrangler deploy --config "$WORKER_CONFIG"
 
-echo "[7/8] Deploying scheduled health Worker"
-npx wrangler deploy --config "$HEALTH_CONFIG"
-
-echo "[8/8] Deploying traffic Worker"
-npx wrangler deploy --config "$TRAFFIC_CONFIG"
-printf '%s' "$AFFINITY_SECRET" | npx wrangler secret put AFFINITY_SECRET --config "$TRAFFIC_CONFIG"
+echo "[6/6] Saving encrypted Worker secrets"
+printf '%s' "$ADMIN_TOKEN" | npx wrangler secret put ADMIN_TOKEN --config "$WORKER_CONFIG"
+printf '%s' "$AFFINITY_SECRET" | npx wrangler secret put AFFINITY_SECRET --config "$WORKER_CONFIG"
+printf '%s' "$TOKEN_ENCRYPTION_KEY" | npx wrangler secret put TOKEN_ENCRYPTION_KEY --config "$WORKER_CONFIG"
 
 cat <<EOF
 
-Worker LB has been deployed.
+Worker LB has been deployed as one Worker: $PREFIX
 
 Management token (shown once):
 $ADMIN_TOKEN
 
-Open the $PREFIX-control workers.dev URL printed above. If Cloudflare Access is
-configured, login through Access. Otherwise enter this token in the WebUI.
+Open the workers.dev URL printed above. In Settings, add a restricted Cloudflare
+API Token with Zone Read, DNS Edit, and Workers Routes Edit. Domains are then
+added entirely from the WebUI; no --routes argument is required.
 
-Traffic routes: ${ROUTES:-not configured}
-Generated configs are stored in .wrangler.generated.*.toml and can be reused.
+Generated config: $WORKER_CONFIG
+Generated secrets: $SECRETS_FILE
 EOF

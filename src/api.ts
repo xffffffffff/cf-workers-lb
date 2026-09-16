@@ -1,4 +1,4 @@
-import type { Endpoint, LoadBalancer, LogEntry, Monitor, Pool } from './types'
+import type { CloudflareConnection, Endpoint, LoadBalancer, LogEntry, Monitor, Pool } from './types'
 
 const tokenKey = 'worker-lb-admin-token'
 
@@ -28,6 +28,7 @@ export interface ControlState {
     connected: boolean
     publishedVersion: number | null
     publishedAt: string | null
+    cloudflare: CloudflareConnection
   }
 }
 

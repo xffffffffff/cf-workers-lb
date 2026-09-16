@@ -1,57 +1,69 @@
 # Worker LB
 
-Worker LB 是部署在 Cloudflare Workers 上的自托管 HTTP/HTTPS 负载平衡器。它包含 BoardUI 风格的 WebUI、独立管理 API、主动健康检查和边缘流量 Worker，使用 D1 保存配置与历史、KV 保存已发布的热配置快照。
+Worker LB 是部署在 Cloudflare Workers 上的自托管 HTTP/HTTPS 负载平衡器。提供 WebUI、管理 API、主动健康检查和边缘流量转发，使用 D1 保存配置与历史、KV 保存已发布的热配置快照。
 
 > 这不是 Cloudflare 官方 Load Balancing 产品，也不使用其付费模板源码。它适合希望自行承担运维与免费额度约束的站点。
 
 ## 一行安装
 
-在项目目录运行（把主机名改成你自己的 4 个域名）：
+从 GitHub 拉取并安装：
 
 ```bash
-./install.sh --routes www.example.com,api.example.com,shop.example.net,admin.example.net
+git clone https://github.com/xffffffffff/cf-workers-lb.git && cd cf-workers-lb && ./install.sh
 ```
 
-脚本会自动检查 Node.js/npm/Wrangler 登录、构建项目、创建 D1 和 KV、执行 migrations、部署三个 Worker、配置每分钟 Cron 和精确主机名 Routes，并生成管理令牌与会话保持密钥。
+脚本会自动检查 Node.js/npm/Wrangler 登录、构建项目、创建 D1 和 KV、执行 migrations、部署一个 Worker、配置每分钟 Cron，并生成管理令牌、会话保持密钥和 Token 加密密钥。安装时不需要填写业务域名。
 
 也可使用 Cloudflare API Token 非交互安装：
 
 ```bash
-CLOUDFLARE_API_TOKEN=你的令牌 ./install.sh --yes --routes www.example.com,api.example.com
+git clone https://github.com/xffffffffff/cf-workers-lb.git && cd cf-workers-lb && CLOUDFLARE_API_TOKEN=部署令牌 ./install.sh
 ```
 
 若已配置 Cloudflare Access：
 
 ```bash
-./install.sh --routes www.example.com,api.example.com --access-team-domain team.cloudflareaccess.com --access-aud YOUR_ACCESS_AUD
+git clone https://github.com/xffffffffff/cf-workers-lb.git && cd cf-workers-lb && ./install.sh --access-team-domain team.cloudflareaccess.com --access-aud YOUR_ACCESS_AUD
 ```
 
-安装结束会显示管理 Worker URL和一次性的管理令牌。未使用 Access 时，在 WebUI 首次打开的连接窗口输入令牌。令牌只保存在当前标签的 `sessionStorage`。本地生成的资源 ID、令牌和密钥文件均已加入 `.gitignore`；请像密码一样保护 `.wrangler.generated.secrets`。
+安装结束会显示 Worker URL 和一次性的管理令牌。未使用 Access 时，在 WebUI 首次打开的连接窗口输入管理令牌；它只保存在当前标签的 `sessionStorage`。本地生成的资源 ID、令牌和密钥文件均已加入 `.gitignore`；请像密码一样保护 `.wrangler.generated.secrets`。
+
+首次进入 WebUI 后，在“设置 → Cloudflare API 连接”中获取并填写一个受限 API Token。它需要 `Zone Read`、`DNS Edit`、`Workers Routes Edit` 权限。Token 通过 HTTPS 提交，由安装时生成的 AES-GCM 密钥加密后存入 D1；WebUI 和 API 不会返回明文。
+
+如果已有域名通过 WebUI 接入，系统会阻止清除 Token。请先删除对应负载平衡器，让系统用当前 Token 清理 Worker Route，再清除 Token。
 
 重复运行安装命令会复用已经创建的 D1/KV 和密钥，不会重复创建资源。
 
+更新已经克隆的项目：
+
+```bash
+cd cf-workers-lb && git pull --ff-only && ./install.sh
+```
+
 ## 首次配置顺序
 
-1. 在“源站”添加两台 VPS，优先使用专用源站主机名。
-2. 创建 HTTPS/HTTP/TCP 监视器。
-3. 创建池并选择源站、监视器。
-4. 等待 Cron 至少完成两次健康检查。
-5. 创建负载平衡器，其主机名必须与安装时的 Worker Route 对应。
-6. 点击“发布配置”。健康源站数不足时，系统会阻止发布。
+1. 在“设置”添加 Cloudflare API Token。
+2. 在“源站”添加 VPS，优先使用专用源站主机名。
+3. 创建 HTTPS/HTTP/TCP 监视器。
+4. 创建池并选择源站、监视器。
+5. 等待 Cron 至少完成两次健康检查。
+6. 创建负载平衡器。系统会自动创建或检查橙色云 DNS，并把精确主机名 Route 绑定到当前 Worker。
+7. 点击“发布配置”。健康源站数不足时，系统会阻止发布。
 
-源站主机名不能命中 Traffic Worker Route，否则会产生回环。安装脚本只为 `--routes` 中列出的公开负载平衡主机名创建精确 Route。HTTPS 源站使用 IP 时必须具有与 IP 匹配的有效证书；实际部署更推荐 `origin.example.com` 形式的专用 DNS 名称。
+源站主机名不能与负载平衡器主机名相同，否则会产生回环。WebUI 只为创建的负载平衡器生成精确主机名 Route。HTTPS 源站使用 IP 时必须具有与 IP 匹配的有效证书；实际部署更推荐 `origin.example.com` 形式的专用 DNS 名称。
 
 ## 架构
 
-- `workers/traffic`：只读取 KV 活动快照；按健康状态、池优先级、权重、延迟或距离选择源站。支持签名 Cookie 会话保持。GET/HEAD 遇到连接错误或 500/502/503/504 时最多重试另一个源站一次；POST 等非幂等请求不重试。
-- `workers/control`：托管 WebUI 和 `/api/*`，负责资源 CRUD、依赖保护、监视器测试、发布、配置历史和回滚 API。支持 Cloudflare Access JWT 或管理 Bearer token。
-- `workers/health`：每分钟由 Cron 唤醒，只执行到期检查。同一源站和监视器组合只探测一次，再更新关联池。默认连续失败 2 次 Down、连续成功 2 次恢复。
+- `workers/unified`：唯一部署入口。`workers.dev` 和指定管理域名只进入 WebUI/API，业务域名只进入转发路径；Cron 事件进入健康检查模块。
+- `workers/traffic`：内部流量模块，只读取 KV 活动快照；按健康状态、池优先级、权重、延迟或距离选择源站。支持签名 Cookie 会话保持。GET/HEAD 遇到连接错误或 500/502/503/504 时最多重试另一个源站一次；POST 等非幂等请求不重试。
+- `workers/control`：内部管理模块，负责资源 CRUD、Token 加密、Cloudflare DNS/Route、依赖保护、发布、配置历史和回滚。支持 Cloudflare Access JWT 或管理 Bearer token。
+- `workers/health`：内部健康模块，每分钟由同一个 Worker 的 Cron 唤醒。默认连续失败 2 次 Down、连续成功 2 次恢复。
 - D1：草稿配置、关系、健康状态/历史、事件日志和配置版本。
-- KV：唯一的活动配置快照。Traffic Worker 使用最多 5 秒 isolate 内存缓存；KV 的全球最终一致性仍可能带来额外传播延迟。
+- KV：唯一的活动配置快照。流量模块使用最多 5 秒 isolate 内存缓存；KV 的全球最终一致性仍可能带来额外传播延迟。
 
-Traffic Worker 启用 `passThroughOnException()`：读取活动配置发生未处理异常时，Worker Route 会回退到该 DNS 记录原本指向的源站。请让公开主机名 DNS 记录指向可接受的保底 VPS。
+流量路径启用 `passThroughOnException()`：读取活动配置发生未处理异常时，Worker Route 会回退到该 DNS 记录原本指向的源站。WebUI 新建 DNS 时使用所选池的第一台启用源站作为保底地址。
 
-正常请求默认只向 D1 采样 1%，故仪表台请求数是采样估算值；故障转移和 5xx 会强制记录。这样可以显著减少免费额度下的 D1 写入量。可在生成的 traffic Wrangler 配置中调整 `REQUEST_LOG_SAMPLE_RATE`。
+正常请求默认只向 D1 采样 1%，故仪表台请求数是采样估算值；故障转移和 5xx 会强制记录。可在生成的统一 Wrangler 配置中调整 `REQUEST_LOG_SAMPLE_RATE`。
 
 ## 删除安全
 
@@ -100,7 +112,7 @@ bash -n install.sh scripts/install.sh
 
 ## 免费额度注意事项
 
-- Workers 免费请求额度由账号下这些 Worker 合计使用，并非每个域名单独计算。安装前请以 Cloudflare 当前套餐页面显示的额度为准。
+- Workers 免费请求额度由账号下所有 Worker 合计使用，并非每个域名单独计算。安装前请以 Cloudflare 当前套餐页面显示的额度为准。
 - D1、KV、Cron、子请求和 CPU 也分别受当前套餐限制；高流量、严格 SLA 或多地域独立探针不适合只依赖免费计划。
 - Cron 在 Cloudflare 单一调度环境发起检查，不能完全复现官方 Load Balancer 的多地域健康探针。
 - KV 是最终一致的。请求时被动重试用于覆盖健康状态传播窗口，但不会重试非幂等请求。
@@ -120,5 +132,6 @@ workers/control/        管理 API + 静态 UI
 workers/health/         Cron 主动健康检查
 workers/shared/         共享模型、探测器、快照构建
 workers/traffic/        请求路径负载平衡
+workers/unified/        唯一 Worker 部署入口
 wrangler.local.toml     本地开发配置
 ```

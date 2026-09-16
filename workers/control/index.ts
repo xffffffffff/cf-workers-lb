@@ -10,6 +10,16 @@ import {
 } from '../shared/model'
 import { buildSnapshot, refreshActiveSnapshotHealth, validateSnapshot, writeActiveSnapshot } from '../shared/snapshot'
 import { probeOrigin } from '../shared/probe'
+import {
+  CloudflareApiError,
+  cloudflareCredentialStatus,
+  deprovisionHostname,
+  provisionHostname,
+  removeCloudflareCredential,
+  saveCloudflareCredential,
+  testCloudflareCredential,
+  type ProvisionedHostname,
+} from '../shared/cloudflare'
 
 interface Env {
   DB: D1Database
@@ -19,6 +29,8 @@ interface Env {
   ADMIN_TOKEN?: string
   ACCESS_TEAM_DOMAIN?: string
   ACCESS_AUD?: string
+  TOKEN_ENCRYPTION_KEY?: string
+  WORKER_NAME?: string
 }
 
 type JsonObject = Record<string, unknown>
@@ -130,7 +142,7 @@ function aggregateHealth(states: string[]) {
 }
 
 async function getControlState(db: D1Database) {
-  const [originsQuery, monitorsQuery, poolsQuery, poolOriginsQuery, loadBalancersQuery, loadBalancerPoolsQuery, healthQuery, logsQuery, versionQuery, analyticsQuery, trafficQuery, sampleRateQuery] = await Promise.all([
+  const [originsQuery, monitorsQuery, poolsQuery, poolOriginsQuery, loadBalancersQuery, loadBalancerPoolsQuery, healthQuery, logsQuery, versionQuery, analyticsQuery, trafficQuery, sampleRateQuery, credentialQuery, routesQuery] = await Promise.all([
     db.prepare('SELECT id, name, address, region, latitude, longitude, weight, enabled FROM origins ORDER BY created_at DESC').all<Record<string, unknown>>(),
     db.prepare('SELECT m.id, m.name, m.type, m.path, m.interval_seconds, m.timeout_seconds, m.expected_codes, m.consecutive_fails, m.consecutive_successes, COUNT(p.id) AS pools FROM monitors m LEFT JOIN pools p ON p.monitor_id = m.id GROUP BY m.id ORDER BY m.created_at DESC').all<Record<string, unknown>>(),
     db.prepare('SELECT id, name, description, monitor_id, minimum_healthy, enabled FROM pools ORDER BY created_at DESC').all<Record<string, unknown>>(),
@@ -143,6 +155,8 @@ async function getControlState(db: D1Database) {
     db.prepare("SELECT e.hostname, SUM(CASE WHEN e.sampled = 1 THEN 1 ELSE 0 END) AS samples, AVG(CASE WHEN e.sampled = 1 THEN e.duration_ms END) AS ttfb, SUM(CASE WHEN e.event_type = 'FAILOVER' THEN 1 ELSE 0 END) AS failovers FROM events e JOIN load_balancers lb ON lb.hostname = e.hostname WHERE julianday(e.occurred_at) >= julianday('now', '-24 hours') GROUP BY e.hostname").all<Record<string, unknown>>(),
     db.prepare("SELECT strftime('%Y-%m-%dT%H:00:00Z', e.occurred_at) AS bucket, SUM(CASE WHEN e.sampled = 1 THEN 1 ELSE 0 END) AS samples, AVG(CASE WHEN e.sampled = 1 THEN e.duration_ms END) AS ttfb FROM events e JOIN load_balancers lb ON lb.hostname = e.hostname WHERE julianday(e.occurred_at) >= julianday('now', '-24 hours') GROUP BY bucket HAVING SUM(CASE WHEN e.sampled = 1 THEN 1 ELSE 0 END) > 0 ORDER BY bucket").all<Record<string, unknown>>(),
     db.prepare("SELECT value_json FROM settings WHERE key = 'request_log_sample_rate'").first<{ value_json: string }>(),
+    db.prepare('SELECT token_hint, verified_at FROM cloudflare_credentials WHERE id = 1').first<{ token_hint: string; verified_at: string }>(),
+    db.prepare('SELECT load_balancer_id, zone_name, route_pattern, route_created, dns_created FROM load_balancer_routes').all<Record<string, unknown>>(),
   ])
 
   const healthRows = healthQuery.results ?? []
@@ -168,11 +182,13 @@ async function getControlState(db: D1Database) {
   const lbPoolRows = loadBalancerPoolsQuery.results ?? []
   const sampleRate = Math.max(0.0001, Math.min(1, Number(sampleRateQuery?.value_json ?? 0.01)))
   const analyticsByHost = new Map((analyticsQuery.results ?? []).map((row) => [String(row.hostname), row]))
+  const routesByLoadBalancer = new Map((routesQuery.results ?? []).map((row) => [String(row.load_balancer_id), row]))
   const loadBalancers = (loadBalancersQuery.results ?? []).map((row) => {
     const poolIds = lbPoolRows.filter((item) => item.load_balancer_id === row.id && item.enabled).map((item) => String(item.pool_id))
     const states = pools.filter((pool) => poolIds.includes(String(pool.id))).map((pool) => String(pool.state))
     const analytics = analyticsByHost.get(String(row.hostname))
-    return { id: row.id, hostname: row.hostname, site: row.site, pools: poolIds, steering: steeringLabels[String(row.steering)] ?? '故障转移', sessionAffinity: Boolean(row.session_affinity), affinityTtlSeconds: row.affinity_ttl_seconds, proximityBuffer: row.proximity_buffer, enabled: Boolean(row.enabled), state: aggregateHealth(states), ttfb: Math.round(Number(analytics?.ttfb ?? 0)), requests: Math.round(Number(analytics?.samples ?? 0) / sampleRate), failovers: Number(analytics?.failovers ?? 0) }
+    const route = routesByLoadBalancer.get(String(row.id))
+    return { id: row.id, hostname: row.hostname, site: row.site, pools: poolIds, steering: steeringLabels[String(row.steering)] ?? '故障转移', sessionAffinity: Boolean(row.session_affinity), affinityTtlSeconds: row.affinity_ttl_seconds, proximityBuffer: row.proximity_buffer, enabled: Boolean(row.enabled), state: aggregateHealth(states), ttfb: Math.round(Number(analytics?.ttfb ?? 0)), requests: Math.round(Number(analytics?.samples ?? 0) / sampleRate), failovers: Number(analytics?.failovers ?? 0), domain: route ? { zone: route.zone_name, routePattern: route.route_pattern, routeManaged: Boolean(route.route_created), dnsManaged: Boolean(route.dns_created) } : null }
   })
 
   const originNames = new Map(origins.map((origin) => [String(origin.id), String(origin.name)]))
@@ -180,7 +196,7 @@ async function getControlState(db: D1Database) {
   const logs = (logsQuery.results ?? []).map((row) => ({ id: String(row.id), time: String(row.occurred_at).slice(11, 19), event: row.event_type, hostname: row.hostname ?? '全部站点', origin: originNames.get(String(row.origin_id)) ?? poolNames.get(String(row.pool_id)) ?? '系统', result: row.message, duration: row.duration_ms == null ? '—' : `${row.duration_ms} ms`, level: row.level }))
 
   const traffic = (trafficQuery.results ?? []).map((row) => ({ time: String(row.bucket).slice(11, 16), requests: Math.round(Number(row.samples ?? 0) / sampleRate), ttfb: Math.round(Number(row.ttfb ?? 0)) }))
-  return { origins, monitors, pools, loadBalancers, logs, analytics: { traffic, sampleRate, failovers: loadBalancers.reduce((sum, item) => sum + Number(item.failovers ?? 0), 0) }, meta: { connected: true, publishedVersion: versionQuery?.version ?? null, publishedAt: versionQuery?.published_at ?? null } }
+  return { origins, monitors, pools, loadBalancers, logs, analytics: { traffic, sampleRate, failovers: loadBalancers.reduce((sum, item) => sum + Number(item.failovers ?? 0), 0) }, meta: { connected: true, publishedVersion: versionQuery?.version ?? null, publishedAt: versionQuery?.published_at ?? null, cloudflare: { configured: Boolean(credentialQuery), tokenHint: credentialQuery?.token_hint ?? null, verifiedAt: credentialQuery?.verified_at ?? null } } }
 }
 
 async function createOrigin(request: Request, env: Env) {
@@ -280,13 +296,29 @@ async function createLoadBalancer(request: Request, env: Env) {
   const id = createId('lb')
   const hostname = normalizeHostname(body.hostname)
   const pools = stringArray(body.pools, '池')
+  const fallback = await env.DB.prepare(`
+    SELECT o.address
+    FROM pool_origins po
+    JOIN origins o ON o.id = po.origin_id AND o.enabled = 1
+    WHERE po.pool_id = ? AND po.enabled = 1
+    ORDER BY po.priority, o.created_at
+    LIMIT 1
+  `).bind(pools[0]).first<{ address: string }>()
+  if (!fallback?.address) throw new Error('所选池没有可用的 DNS 保底源站')
+  const provisioned = await provisionHostname(hostname, fallback.address, env)
   const statements = [
     env.DB.prepare('INSERT INTO load_balancers(id, hostname, site, steering, session_affinity, affinity_ttl_seconds, proximity_buffer, enabled) VALUES (?, ?, ?, ?, ?, ?, ?, 1)').bind(id, hostname, requiredText(body.site, '站点名称'), steeringValue(body.steering), Number(booleanValue(body.sessionAffinity, true)), integerInRange(body.affinityTtlSeconds ?? 1800, 60, 604800, '会话保持时间'), numberInRange(body.proximityBuffer ?? 0.15, 0, 1, '距离缓冲')),
     ...pools.map((poolId, priority) => env.DB.prepare('INSERT INTO load_balancer_pools(load_balancer_id, pool_id, priority, enabled) VALUES (?, ?, ?, 1)').bind(id, poolId, priority)),
+    env.DB.prepare('INSERT INTO load_balancer_routes(load_balancer_id, zone_id, zone_name, route_id, route_pattern, route_created, dns_record_id, dns_created) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').bind(id, provisioned.zoneId, provisioned.zoneName, provisioned.routeId, provisioned.routePattern, Number(provisioned.routeCreated), provisioned.dnsRecordId, Number(provisioned.dnsCreated)),
   ]
-  await env.DB.batch(statements)
+  try {
+    await env.DB.batch(statements)
+  } catch (error) {
+    await deprovisionHostname(provisioned, env, true).catch(() => undefined)
+    throw error
+  }
   await recordEvent(env.DB, 'CONFIG', '负载平衡器已创建', { hostname })
-  return json({ id }, 201)
+  return json({ id, domain: provisioned }, 201)
 }
 
 async function testMonitor(request: Request, env: Env) {
@@ -382,15 +414,37 @@ async function deleteEntity(table: 'origins' | 'monitors' | 'pools' | 'load_bala
   return new Response(null, { status: 204, headers: securityHeaders })
 }
 
+async function deleteLoadBalancer(id: string, request: Request, env: Env) {
+  const row = await env.DB.prepare('SELECT zone_id, zone_name, route_id, route_pattern, route_created, dns_record_id, dns_created FROM load_balancer_routes WHERE load_balancer_id = ?').bind(id).first<Record<string, unknown>>()
+  if (row) {
+    const provisioned: ProvisionedHostname = {
+      zoneId: String(row.zone_id), zoneName: String(row.zone_name), routeId: String(row.route_id), routePattern: String(row.route_pattern),
+      routeCreated: Boolean(row.route_created), dnsRecordId: row.dns_record_id ? String(row.dns_record_id) : null, dnsCreated: Boolean(row.dns_created),
+    }
+    const removeDns = new URL(request.url).searchParams.get('removeDns') === 'true'
+    await deprovisionHostname(provisioned, env, removeDns)
+  }
+  return deleteEntity('load_balancers', id, env)
+}
+
 async function routeApi(request: Request, env: Env) {
   const url = new URL(request.url)
   const path = url.pathname.replace(/\/+$/, '') || '/'
   const parts = path.split('/').filter(Boolean).map(decodeURIComponent)
 
-  if (request.method === 'GET' && path === '/api/health') return json({ ok: true, service: 'worker-lb-control', time: new Date().toISOString() })
+  if (request.method === 'GET' && path === '/api/health') return json({ ok: true, service: 'worker-lb', time: new Date().toISOString() })
   if (!await authorized(request, env)) return json({ error: '需要 Cloudflare Access 登录或有效管理令牌', code: 'UNAUTHORIZED' }, 401, { 'www-authenticate': 'Bearer realm="Worker LB"' })
 
   if (request.method === 'GET' && path === '/api/state') return json(await getControlState(env.DB))
+  if (request.method === 'PUT' && path === '/api/cloudflare/token') {
+    const body = await readJson(request)
+    return json(await saveCloudflareCredential(body.token, env))
+  }
+  if (request.method === 'POST' && path === '/api/cloudflare/test') return json(await testCloudflareCredential(env))
+  if (request.method === 'DELETE' && path === '/api/cloudflare/token') {
+    await removeCloudflareCredential(env)
+    return new Response(null, { status: 204, headers: securityHeaders })
+  }
   if (request.method === 'GET' && path === '/api/versions') return listVersions(env)
   if (request.method === 'POST' && path === '/api/publish') return publishConfiguration(request, env)
   if (request.method === 'POST' && parts[1] === 'versions' && parts[3] === 'rollback') return rollbackConfiguration(parts[2], env)
@@ -405,6 +459,7 @@ async function routeApi(request: Request, env: Env) {
   if (request.method === 'DELETE' && parts.length === 3) {
     const tables = { origins: 'origins', monitors: 'monitors', pools: 'pools', 'load-balancers': 'load_balancers' } as const
     const table = tables[parts[1] as keyof typeof tables]
+    if (table === 'load_balancers') return deleteLoadBalancer(parts[2], request, env)
     if (table) return deleteEntity(table, parts[2], env)
   }
   return json({ error: 'API 路径不存在' }, 404)
@@ -421,6 +476,7 @@ export default {
       return new Response(response.body, { status: response.status, statusText: response.statusText, headers })
     } catch (error) {
       const message = error instanceof Error ? error.message : '未知错误'
+      if (error instanceof CloudflareApiError) return json({ error: message, code: 'CLOUDFLARE_API_ERROR' }, error.status)
       const conflict = /UNIQUE constraint|FOREIGN KEY constraint/i.test(message)
       return json({ error: conflict ? '记录重复，或仍被其他配置引用' : message }, conflict ? 409 : 400)
     }

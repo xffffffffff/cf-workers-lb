@@ -50,6 +50,18 @@ export interface LoadBalancer {
   affinityTtlSeconds?: number
   proximityBuffer?: number
   failovers?: number
+  domain?: {
+    zone: string
+    routePattern: string
+    routeManaged: boolean
+    dnsManaged: boolean
+  } | null
+}
+
+export interface CloudflareConnection {
+  configured: boolean
+  tokenHint: string | null
+  verifiedAt: string | null
 }
 
 export interface LogEntry {

@@ -1,9 +1,7 @@
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 
-const controlUrl = process.env.WORKER_LB_CONTROL_URL ?? 'http://127.0.0.1:8788'
-const healthUrl = process.env.WORKER_LB_HEALTH_URL ?? 'http://127.0.0.1:8789'
-const trafficUrl = process.env.WORKER_LB_TRAFFIC_URL ?? 'http://127.0.0.1:8790'
+const workerUrl = process.env.WORKER_LB_URL ?? 'http://127.0.0.1:8787'
 const suffix = Date.now().toString(36)
 const hostname = `full-${suffix}.example.com`
 
@@ -25,7 +23,7 @@ function originServer(name, port) {
 }
 
 async function api(path, options = {}, expectedStatus = 200) {
-  const response = await fetch(`${controlUrl}${path}`, { ...options, headers: options.body ? { 'content-type': 'application/json', ...options.headers } : options.headers })
+  const response = await fetch(`${workerUrl}${path}`, { ...options, headers: options.body ? { 'content-type': 'application/json', ...options.headers } : options.headers })
   const body = response.headers.get('content-type')?.includes('application/json') ? await response.json() : null
   assert.equal(response.status, expectedStatus, `${options.method ?? 'GET'} ${path}: ${JSON.stringify(body)}`)
   return body
@@ -46,7 +44,7 @@ try {
   poolId = (await api('/api/pools', { method: 'POST', body: JSON.stringify({ name: `Full Pool ${suffix}`, monitor: monitorId, origins: originIds }) }, 201)).id
   loadBalancerId = (await api('/api/load-balancers', { method: 'POST', body: JSON.stringify({ hostname, site: 'Full E2E', steering: 'random', sessionAffinity: true, pools: [poolId] }) }, 201)).id
 
-  const healthResponse = await fetch(`${healthUrl}/run`, { method: 'POST' })
+  const healthResponse = await fetch(`${workerUrl}/__health/run`, { method: 'POST' })
   assert.equal(healthResponse.status, 200)
   const health = await healthResponse.json()
   assert.equal(health.checked, 2)
@@ -55,7 +53,7 @@ try {
   const published = await api('/api/publish', { method: 'POST', body: '{}' })
   assert.ok(published.version > 0)
 
-  const first = await fetch(`${trafficUrl}/resource`, { headers: { 'x-worker-lb-test-host': hostname } })
+  const first = await fetch(`${workerUrl}/resource`, { headers: { 'x-worker-lb-test-mode': 'traffic', 'x-worker-lb-test-host': hostname } })
   assert.equal(first.status, 200)
   const selectedName = first.headers.get('x-test-origin')
   assert.ok(selectedName === 'alpha' || selectedName === 'beta')
@@ -64,11 +62,11 @@ try {
 
   const selected = origins.find((item) => item.name === selectedName)
   selected.state.fail = true
-  const retried = await fetch(`${trafficUrl}/resource`, { headers: { 'x-worker-lb-test-host': hostname, cookie } })
+  const retried = await fetch(`${workerUrl}/resource`, { headers: { 'x-worker-lb-test-mode': 'traffic', 'x-worker-lb-test-host': hostname, cookie } })
   assert.equal(retried.status, 200)
   assert.notEqual(retried.headers.get('x-test-origin'), selectedName)
 
-  const post = await fetch(`${trafficUrl}/resource`, { method: 'POST', headers: { 'x-worker-lb-test-host': hostname, cookie }, body: 'do-not-replay' })
+  const post = await fetch(`${workerUrl}/resource`, { method: 'POST', headers: { 'x-worker-lb-test-mode': 'traffic', 'x-worker-lb-test-host': hostname, cookie }, body: 'do-not-replay' })
   assert.equal(post.status, 503)
 
   console.log('Worker LB full health, publish, affinity, and failover test passed')

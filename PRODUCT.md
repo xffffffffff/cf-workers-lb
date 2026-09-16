@@ -37,12 +37,13 @@ The product recreates the essential operating model of Cloudflare Load Balancing
 
 ## Implemented Architecture
 
-- Separate traffic, control, and scheduled-health Workers.
+- One deployed Worker with isolated traffic, control, and scheduled-health modules.
 - D1-backed drafts, relationships, health history, events, and versioned snapshots.
 - KV-backed published configuration with a short isolate-memory cache on the traffic path.
 - Cloudflare Access JWT verification with a generated management-token fallback.
 - Dependency-safe deletion for load balancers, pools, monitors, and origins.
-- One-command Wrangler installer for D1, KV, migrations, secrets, routes, assets, and Cron.
+- One-command Wrangler installer for D1, KV, migrations, secrets, assets, and Cron; DNS and exact Worker Routes are managed later from the WebUI.
+- AES-GCM encrypted Cloudflare API credentials entered from the WebUI, with no plaintext readback endpoint.
 - Sampled request analytics to keep D1 write usage practical on the free plan.
 
 ## Brand Commitments

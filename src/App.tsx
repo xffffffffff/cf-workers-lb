@@ -409,10 +409,14 @@ function ChartTooltip({ active, payload, label }: { active?: boolean; payload?: 
 function LoadBalancersPage() {
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
+  const backend = useControlPlane((state) => state.backend)
+  const cloudflare = useControlPlane((state) => state.cloudflare)
   const loadBalancers = useControlPlane((state) => state.loadBalancers)
   const pools = useControlPlane((state) => state.pools)
   const addLoadBalancer = useControlPlane((state) => state.addLoadBalancer)
+  const setActiveView = useControlPlane((state) => state.setActiveView)
   const filtered = loadBalancers.filter((item) => `${item.hostname} ${item.site}`.toLowerCase().includes(query.toLowerCase()))
+  const needsCloudflareToken = backend === 'connected' && !cloudflare.configured
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -432,24 +436,32 @@ function LoadBalancersPage() {
     try {
       await addLoadBalancer(next)
       setOpen(false)
-      toast.success(`${hostname} 已创建`, { description: '发布配置后将在边缘生效。' })
+      toast.success(`${hostname} 已创建`, { description: 'DNS 与 Worker Route 已接入；发布配置后将在边缘生效。' })
     } catch (error) { toast.error(errorMessage(error)) }
   }
 
   return (
     <>
-      <PageIntro description="将主机名连接到池，并配置邻近感知、会话保持与故障转移策略。" action={<button className={button({ intent: 'primary' })} type="button" onClick={() => setOpen(true)}><Icon name="plus" width={17} height={17} />创建负载平衡器</button>} />
+      <PageIntro description="将主机名连接到池，并配置邻近感知、会话保持与故障转移策略。" action={needsCloudflareToken
+        ? <button className={button({ intent: 'primary' })} type="button" onClick={() => setActiveView('settings')}><Icon name="settings" width={17} height={17} />先配置 Cloudflare Token</button>
+        : <button className={button({ intent: 'primary' })} type="button" onClick={() => setOpen(true)}><Icon name="plus" width={17} height={17} />创建负载平衡器</button>} />
+      {needsCloudflareToken && <section className="connection-notice" role="status">
+        <span className="connection-notice-icon"><Icon name="globe" width={18} height={18} /></span>
+        <div><strong>先连接 Cloudflare API</strong><p>创建负载平衡器需要自动检查橙色云 DNS，并把该主机名精确绑定到当前 Worker。</p></div>
+        <button className={button({ intent: 'secondary', compact: true })} type="button" onClick={() => setActiveView('settings')}>前往设置</button>
+      </section>}
       <section className="surface table-surface">
         <DataToolbar count={filtered.length} unit="个负载平衡器" query={query} setQuery={setQuery} placeholder="搜索主机名或站点" />
         <div className="table-scroll">
           <table className="data-table">
-            <thead><tr><th>主机名</th><th>站点</th><th>池</th><th>转向策略</th><th>状态</th><th>TTFB</th><th>24 小时请求</th><th><span className="sr-only">操作</span></th></tr></thead>
-            <tbody>{filtered.map((item) => <tr key={item.id}><td><button className="table-link" type="button" onClick={() => toast.info(item.hostname, { description: '可通过管理 API 更新该负载平衡器。' })}>{item.hostname}</button></td><td>{item.site}</td><td><div className="pool-chips">{item.pools.map((pool) => <span key={pool}>{pool.replace('pool-', '')}</span>)}</div></td><td>{item.steering}</td><td><StatusBadge state={item.state} /></td><td className="numeric">{item.ttfb ? `${item.ttfb} ms` : '—'}</td><td className="numeric">{formatNumber(item.requests)}</td><td><DeleteResourceButton kind="load-balancers" id={item.id} name={item.hostname} compact /></td></tr>)}</tbody>
+            <thead><tr><th>主机名</th><th>站点</th><th>池</th><th>转向策略</th><th>接入</th><th>状态</th><th>TTFB</th><th>24 小时请求</th><th><span className="sr-only">操作</span></th></tr></thead>
+            <tbody>{filtered.map((item) => <tr key={item.id}><td><button className="table-link" type="button" onClick={() => toast.info(item.hostname, { description: item.domain ? `${item.domain.routePattern} 已绑定到当前 Worker。` : '该记录尚无 Cloudflare 域名接入信息。' })}>{item.hostname}</button></td><td>{item.site}</td><td><div className="pool-chips">{item.pools.map((pool) => <span key={pool}>{pool.replace('pool-', '')}</span>)}</div></td><td>{item.steering}</td><td><span className={clsx('domain-status', item.domain && 'is-connected')}><span />{item.domain ? '已接入' : '未接入'}</span>{item.domain && <small className="domain-zone">{item.domain.zone}</small>}</td><td><StatusBadge state={item.state} /></td><td className="numeric">{item.ttfb ? `${item.ttfb} ms` : '—'}</td><td className="numeric">{formatNumber(item.requests)}</td><td><DeleteResourceButton kind="load-balancers" id={item.id} name={item.hostname} compact /></td></tr>)}</tbody>
           </table>
         </div>
       </section>
-      <Modal open={open} onOpenChange={setOpen} title="创建负载平衡器" description="设置公开主机名和默认路由策略。">
+      <Modal open={open} onOpenChange={setOpen} title="创建负载平衡器" description="设置公开主机名和默认路由策略。Cloudflare 接入会在创建时一次完成。">
         <form className="form-stack" onSubmit={submit}>
+          <div className="domain-provision-note"><Icon name="globe" width={18} height={18} /><div><strong>自动接入域名</strong><p>系统将查找所属 Zone，检查或创建橙色云 DNS，再创建 <code>hostname/*</code> 精确 Worker Route。</p></div></div>
           <Field label="主机名"><input name="hostname" required placeholder="www.example.com" /></Field>
           <Field label="站点名称"><input name="site" required placeholder="生产官网" /></Field>
           <div className="field-row">
@@ -659,10 +671,48 @@ function LogsTable({ logs }: { logs: ReturnType<typeof useControlPlane.getState>
 function SettingsPage() {
   const theme = useControlPlane((state) => state.theme)
   const toggleTheme = useControlPlane((state) => state.toggleTheme)
+  const cloudflare = useControlPlane((state) => state.cloudflare)
+  const saveCloudflareToken = useControlPlane((state) => state.saveCloudflareToken)
+  const testCloudflareToken = useControlPlane((state) => state.testCloudflareToken)
+  const removeCloudflareToken = useControlPlane((state) => state.removeCloudflareToken)
+  const loadBalancers = useControlPlane((state) => state.loadBalancers)
+  const [savingToken, setSavingToken] = useState(false)
+  const attachedDomainCount = loadBalancers.filter((item) => item.domain).length
+
+  async function submitCloudflareToken(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    const form = event.currentTarget
+    const token = String(new FormData(form).get('cloudflareToken') ?? '')
+    setSavingToken(true)
+    try {
+      const result = await saveCloudflareToken(token)
+      form.reset()
+      toast.success('Cloudflare API Token 已加密保存', { description: `已验证 ${result.zoneCount} 个可管理 Zone。` })
+    } catch (error) { toast.error(errorMessage(error)) } finally { setSavingToken(false) }
+  }
+
   return (
     <>
       <PageIntro description="控制管理界面、安全访问与配置发布行为。" />
       <div className="settings-layout">
+        <section className="surface settings-card cloudflare-token-card">
+          <div className="settings-heading">
+            <div><h2>Cloudflare API 连接</h2><p>用于在创建负载平衡器时自动配置橙色云 DNS 和 Worker Route。</p></div>
+            <span className={clsx('status-badge', cloudflare.configured ? 'is-healthy' : 'is-degraded')}><span className="status-dot" />{cloudflare.configured ? '已连接' : '未配置'}</span>
+          </div>
+          <div className="token-permissions"><span>所需权限</span><code>Zone Read</code><code>DNS Edit</code><code>Workers Routes Edit</code></div>
+          <form className="token-form" onSubmit={submitCloudflareToken}>
+            <Field label={cloudflare.configured ? `替换 Token（当前 ${cloudflare.tokenHint ?? ''}）` : 'Cloudflare API Token'}><input name="cloudflareToken" type="password" required minLength={20} maxLength={256} autoComplete="new-password" placeholder="粘贴 API Token，仅通过 HTTPS 提交" /></Field>
+            <div className="token-actions">
+              <a className={button({ intent: 'secondary', compact: true })} href="https://dash.cloudflare.com/profile/api-tokens" target="_blank" rel="noreferrer">获取 Token</a>
+              {cloudflare.configured && <button className={button({ intent: 'secondary', compact: true })} type="button" onClick={() => { toast.promise(testCloudflareToken(), { loading: '正在验证 Cloudflare 权限…', success: (result) => `连接正常 · ${result.zoneCount} 个 Zone`, error: (error) => errorMessage(error) }) }}>测试连接</button>}
+              <button className={button({ intent: 'primary', compact: true })} type="submit" disabled={savingToken}>{savingToken ? '正在验证…' : cloudflare.configured ? '替换 Token' : '保存 Token'}</button>
+              {cloudflare.configured && <button className={button({ intent: 'danger', compact: true })} type="button" disabled={attachedDomainCount > 0} title={attachedDomainCount ? `请先删除 ${attachedDomainCount} 个已接入域名的负载平衡器` : undefined} onClick={() => { toast.promise(removeCloudflareToken(), { loading: '正在清除 Token…', success: 'Cloudflare API Token 已清除', error: (error) => errorMessage(error) }) }}>清除</button>}
+            </div>
+          </form>
+          <p className="token-security-note">Token 使用安装时生成的 AES-GCM 密钥加密后保存；界面和 API 均不会返回 Token 明文。建议同时使用 Cloudflare Access 保护此管理地址。</p>
+          {attachedDomainCount > 0 && <p className="token-route-warning">已有 {attachedDomainCount} 个域名由本系统接入。请先删除对应负载平衡器，让系统清理 Worker Route，再清除 Token。</p>}
+        </section>
         <section className="surface settings-card"><div className="settings-heading"><div><h2>外观</h2><p>选择控制台使用的显示主题。</p></div></div><label className="settings-row"><span><strong>深色模式</strong><small>跟随当前控制台设置，不影响站点流量。</small></span><span className="switch-control"><input type="checkbox" checked={theme === 'dark'} onChange={toggleTheme} /><span /></span></label></section>
         <section className="surface settings-card"><div className="settings-heading"><div><h2>配置发布</h2><p>先验证，再把版本化快照发布到 KV。</p></div></div><label className="settings-row"><span><strong>发布前健康验证</strong><small>任一池没有健康源站时阻止发布。</small></span><span className="switch-control"><input type="checkbox" defaultChecked /><span /></span></label><label className="settings-row"><span><strong>保留历史版本</strong><small>在 D1 中保存最近 20 个可回滚版本。</small></span><span className="switch-control"><input type="checkbox" defaultChecked /><span /></span></label></section>
         <section className="surface settings-card"><div className="settings-heading"><div><h2>访问控制</h2><p>建议由 Cloudflare Access 保护管理 Worker。</p></div><span className="soft-chip">推荐</span></div><div className="settings-row"><span><strong>Cloudflare Access</strong><small>仅允许指定身份提供商和电子邮件域登录。</small></span><button className={button({ intent: 'secondary', compact: true })} type="button" onClick={() => toast.info('部署阶段将引导配置 Access 策略')}>配置</button></div></section>
