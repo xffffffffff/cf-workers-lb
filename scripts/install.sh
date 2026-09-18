@@ -147,6 +147,27 @@ find_existing_kv() {
   ' "$PREFIX-config"
 }
 
+json_has_id() {
+  node -e '
+    let input = "";
+    process.stdin.on("data", (chunk) => { input += chunk });
+    process.stdin.on("end", () => {
+      const id = process.argv[1];
+      const key = process.argv[2];
+      const found = JSON.parse(input).some((item) => String(item[key] ?? item.uuid ?? item.id ?? "") === id);
+      process.exit(found ? 0 : 1);
+    });
+  ' "$1" "$2"
+}
+
+if [[ -n "$DB_ID" ]] && ! npx wrangler d1 list --json --config "$PROVISION_CONFIG" | json_has_id "$DB_ID" uuid; then
+  echo "[3/6] Saved D1 $DB_ID is not in this Cloudflare account"
+  DB_ID=""
+fi
+if [[ -n "$KV_ID" ]] && ! npx wrangler kv namespace list --config "$PROVISION_CONFIG" | json_has_id "$KV_ID" id; then
+  echo "[3/6] Saved KV $KV_ID is not in this Cloudflare account"
+  KV_ID=""
+fi
 if [[ "$PROVISION_CONFIG_EXISTED" -eq 1 && -z "$DB_ID" ]]; then
   DB_ID="$(find_existing_d1)"
 fi

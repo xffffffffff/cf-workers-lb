@@ -20,6 +20,7 @@ import { Toaster, toast } from 'sonner'
 import { Icon, type IconName } from './icons'
 import { useControlPlane, type ResourceKind } from './store'
 import { isReachabilityExpected, REACHABILITY_MONITOR_ID, type Endpoint, type HealthState, type LoadBalancer, type Monitor, type Pool, type ViewId } from './types'
+import { worldLandPath } from './world-land'
 
 const button = cva('button', {
   variants: {
@@ -65,6 +66,12 @@ function formatNumber(value: number) {
 
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : '操作失败，请稍后重试'
+}
+
+function projectOrigin(endpoint: Endpoint) {
+  const [latitude, longitude] = endpoint.coordinates.split(',').map(Number)
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return null
+  return { endpoint, x: longitude + 180, y: 90 - latitude }
 }
 
 function isSimpleMonitor(monitor: Monitor) {
@@ -638,11 +645,10 @@ function OriginsPage() {
   const addEndpoint = useControlPlane((state) => state.addEndpoint)
   const updateEndpoint = useControlPlane((state) => state.updateEndpoint)
   const toggleEndpointHealth = useControlPlane((state) => state.toggleEndpointHealth)
-  const mapOrigins = endpoints.map((endpoint) => {
-    const [latitude, longitude] = endpoint.coordinates.split(',').map(Number)
-    return { endpoint, x: 50 + (longitude + 180) / 360 * 700, y: 30 + (90 - latitude) / 180 * 300 }
-  }).filter((item) => Number.isFinite(item.x) && Number.isFinite(item.y))
-  const route = mapOrigins.length > 1 ? `M${mapOrigins[0].x} ${mapOrigins[0].y} Q400 105 ${mapOrigins[1].x} ${mapOrigins[1].y}` : undefined
+  const mapOrigins = endpoints.flatMap((endpoint) => {
+    const projected = projectOrigin(endpoint)
+    return projected ? [projected] : []
+  })
 
   function openCreate() {
     setEditing(null)
@@ -695,17 +701,19 @@ function OriginsPage() {
       <PageIntro description="添加 VPS 后即可加入池。默认健康检查只确认该地址能否访问，不必准备 /healthz。" action={<button className={button({ intent: 'primary' })} type="button" onClick={openCreate}><Icon name="plus" width={17} height={17} />添加源站</button>} />
       <div className="origin-page-grid">
         <section className="surface proximity-map-card">
-          <div className="surface-heading"><div><span className="section-kicker">邻近感知</span><h2>源站地图</h2></div><span className="soft-chip">15% 距离缓冲</span></div>
-          <div className="proximity-map" role="img" aria-label={`${endpoints.length} 个源站的邻近路由坐标图`}>
-            <svg viewBox="0 0 800 360" preserveAspectRatio="xMidYMid meet">
-              <defs><pattern id="coordinate-grid" width="87.5" height="75" patternUnits="userSpaceOnUse"><path className="map-grid-line" d="M87.5 0H0V75" /></pattern></defs>
-              <rect className="map-frame" x="50" y="30" width="700" height="300" rx="24" />
-              <rect className="map-grid" x="50" y="30" width="700" height="300" rx="24" fill="url(#coordinate-grid)" />
-              {route && <path className="route-line" d={route} />}
-              {mapOrigins.map(({ endpoint, x, y }) => <g className={clsx('map-origin', `is-${endpoint.state}`)} transform={`translate(${x} ${y})`} key={endpoint.id}><circle r="17" /><circle r="5" /><text x={x > 620 ? -25 : 25} y="5" textAnchor={x > 620 ? 'end' : 'start'}>{endpoint.name}</text></g>)}
-              {!mapOrigins.length && <text className="map-empty" x="400" y="180" textAnchor="middle">添加源站后将在这里显示坐标</text>}
+          <div className="surface-heading"><div><span className="section-kicker">邻近感知</span><h2>源站地图</h2></div><span className="soft-chip">按经纬度显示</span></div>
+          <div className="proximity-map" role="img" aria-label={`${endpoints.length} 个源站在世界地图上的位置`}>
+            <svg viewBox="0 0 360 180" preserveAspectRatio="xMidYMid meet">
+              <rect className="world-ocean" width="360" height="180" />
+              <path className="world-land" d={worldLandPath} />
+              {mapOrigins.map(({ endpoint, x, y }) => {
+                const labelLeft = x > 300
+                const labelBelow = y < 16
+                return <g className={clsx('map-origin', `is-${endpoint.state}`)} transform={`translate(${x} ${y})`} key={endpoint.id}><title>{endpoint.name} · {endpoint.region}</title><circle className="map-origin-halo" r="5.4" /><circle className="map-origin-dot" r="2.15" /><text x={labelLeft ? -7 : 7} y={labelBelow ? 10 : -6.5} textAnchor={labelLeft ? 'end' : 'start'}>{endpoint.name}</text></g>
+              })}
+              {!mapOrigins.length && <text className="map-empty" x="180" y="96" textAnchor="middle">添加源站后将按地理位置显示</text>}
             </svg>
-            <span className="map-legend"><i />活动路由 <i />健康源站</span>
+            <span className="map-legend"><i className="is-healthy" />健康源站 <i className="is-unhealthy" />不健康</span>
           </div>
         </section>
         <div className="origin-detail-stack">
