@@ -68,6 +68,24 @@ function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : '操作失败，请稍后重试'
 }
 
+function addressLooksLikeIp(address: string) {
+  try {
+    const hostname = new URL(`https://${address.trim()}`).hostname.replace(/^\[|\]$/g, '')
+    return hostname.includes(':') || /^(?:\d{1,3}\.){3}\d{1,3}$/.test(hostname)
+  } catch {
+    return false
+  }
+}
+
+function nextOriginHost(zone: string, endpoints: Endpoint[], editingId?: string) {
+  const domain = zone.trim().toLowerCase().replace(/\.$/, '')
+  if (!domain) return ''
+  const used = new Set(endpoints.filter((item) => item.id !== editingId && item.connectionHost).map((item) => String(item.connectionHost).toLowerCase()))
+  let index = 1
+  while (used.has(`origin-${index}.${domain}`)) index += 1
+  return `origin-${index}.${domain}`
+}
+
 function projectOrigin(endpoint: Endpoint) {
   const [latitude, longitude] = endpoint.coordinates.split(',').map(Number)
   if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return null
@@ -641,47 +659,94 @@ function PoolsPage() {
 function OriginsPage() {
   const [open, setOpen] = useState(false)
   const [editing, setEditing] = useState<Endpoint | null>(null)
+  const [address, setAddress] = useState('')
+  const [zoneDraft, setZoneDraft] = useState('')
+  const [zones, setZones] = useState<string[]>([])
+  const [savingZone, setSavingZone] = useState(false)
   const endpoints = useControlPlane((state) => state.endpoints)
+  const originDnsZone = useControlPlane((state) => state.originDnsZone)
+  const cloudflare = useControlPlane((state) => state.cloudflare)
+  const backend = useControlPlane((state) => state.backend)
   const addEndpoint = useControlPlane((state) => state.addEndpoint)
   const updateEndpoint = useControlPlane((state) => state.updateEndpoint)
   const toggleEndpointHealth = useControlPlane((state) => state.toggleEndpointHealth)
+  const listCloudflareZones = useControlPlane((state) => state.listCloudflareZones)
+  const saveOriginDnsZone = useControlPlane((state) => state.saveOriginDnsZone)
+  const setActiveView = useControlPlane((state) => state.setActiveView)
   const mapOrigins = endpoints.flatMap((endpoint) => {
     const projected = projectOrigin(endpoint)
     return projected ? [projected] : []
   })
+  const previewHost = editing?.connectionHost || (addressLooksLikeIp(address) && originDnsZone ? nextOriginHost(originDnsZone, endpoints, editing?.id) : '')
+  const needsCloudflareToken = backend === 'connected' && !cloudflare.configured
 
   function openCreate() {
+    if (!originDnsZone) {
+      toast.error('请先设置源站接入域名')
+      return
+    }
     setEditing(null)
+    setAddress('')
     setOpen(true)
   }
 
   function openEdit(endpoint: Endpoint) {
     setEditing(endpoint)
+    setAddress(endpoint.address)
     setOpen(true)
+  }
+
+  useEffect(() => {
+    if (!cloudflare.configured) return
+    void listCloudflareZones().then((list) => {
+      setZones(list)
+      setZoneDraft((current) => originDnsZone || current || list[0] || '')
+    }).catch(() => setZones([]))
+  }, [cloudflare.configured, listCloudflareZones, originDnsZone])
+
+  async function submitZone(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    const zone = String(new FormData(event.currentTarget).get('zone') ?? '').trim()
+    if (!zone) {
+      toast.error('请填写接入域名')
+      return
+    }
+    setSavingZone(true)
+    try {
+      const result = await saveOriginDnsZone(zone)
+      toast.success(`接入域名已设为 ${result.zone}`, { description: result.provisioned.length ? `已为 ${result.provisioned.length} 个源站自动补齐灰云记录。` : '之后添加的源站都会自动分配 origin-1、origin-2…' })
+    } catch (error) {
+      toast.error(errorMessage(error))
+    } finally {
+      setSavingZone(false)
+    }
   }
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     const form = new FormData(event.currentTarget)
-    const name = String(form.get('name')).trim()
-    const address = String(form.get('address')).trim()
-    const connectionHost = String(form.get('connectionHost') ?? '').trim() || null
+    const nextName = String(form.get('name')).trim()
+    const nextAddress = String(form.get('address')).trim()
     const region = String(form.get('region')).trim()
     const latitude = Number(form.get('latitude'))
     const longitude = Number(form.get('longitude'))
     const weight = Number(form.get('weight'))
-    const duplicate = endpoints.some((endpoint) => endpoint.id !== editing?.id && endpoint.address.toLowerCase() === address.toLowerCase())
+    const duplicate = endpoints.some((endpoint) => endpoint.id !== editing?.id && endpoint.address.toLowerCase() === nextAddress.toLowerCase())
 
     if (duplicate) {
       toast.error('该源站地址已经存在')
       return
     }
+    if (addressLooksLikeIp(nextAddress) && !originDnsZone) {
+      toast.error('请先设置源站接入域名')
+      return
+    }
 
     const next: Endpoint = {
-      id: `origin-${Date.now()}`,
-      name,
-      address,
-      connectionHost,
+      id: editing?.id ?? `origin-${Date.now()}`,
+      name: nextName,
+      address: nextAddress,
+      connectionHost: editing?.connectionHost ?? null,
       region,
       coordinates: `${latitude.toFixed(4)}, ${longitude.toFixed(4)}`,
       latency: 0,
@@ -692,13 +757,38 @@ function OriginsPage() {
       if (editing) await updateEndpoint(next)
       else await addEndpoint(next)
       setOpen(false)
-      toast.success(`${name} 已${editing ? '更新' : '添加'}`, { description: editing ? '重新发布配置后在线上生效。' : '现在可以在创建池时选择这个源站。' })
+      toast.success(`${nextName} 已${editing ? '更新' : '添加'}`, { description: previewHost && !editing ? `已接入 ${previewHost}，发布配置后在线上生效。` : '重新发布配置后在线上生效。' })
     } catch (error) { toast.error(errorMessage(error)) }
   }
 
   return (
     <>
-      <PageIntro description="添加 VPS 后即可加入池。默认健康检查只确认该地址能否访问，不必准备 /healthz。" action={<button className={button({ intent: 'primary' })} type="button" onClick={openCreate}><Icon name="plus" width={17} height={17} />添加源站</button>} />
+      <PageIntro description="接入域名只需设置一次。之后每个源站都会自动分配 origin-1、origin-2… 并创建灰云 A 记录。" action={needsCloudflareToken
+        ? <button className={button({ intent: 'primary' })} type="button" onClick={() => setActiveView('settings')}><Icon name="settings" width={17} height={17} />先配置 Cloudflare Token</button>
+        : <button className={button({ intent: 'primary' })} type="button" onClick={openCreate}><Icon name="plus" width={17} height={17} />添加源站</button>} />
+      {needsCloudflareToken && <section className="connection-notice" role="status">
+        <span className="connection-notice-icon"><Icon name="globe" width={18} height={18} /></span>
+        <div><strong>先连接 Cloudflare API</strong><p>添加源站时需要自动创建灰云 A 记录。Token 需要 Zone Read 和 DNS Edit。</p></div>
+        <button className={button({ intent: 'secondary', compact: true })} type="button" onClick={() => setActiveView('settings')}>前往设置</button>
+      </section>}
+      {!needsCloudflareToken && <section className="surface origin-zone-card">
+        <div className="settings-heading">
+          <div>
+            <span className="section-kicker">接入域名</span>
+            <h2>{originDnsZone || '尚未设置'}</h2>
+            <p>{originDnsZone ? '所有源站共用这个域名，前缀按序号自动补齐，无需每个源站再填一次。' : '设置一次后，东京、新加坡等源站都会自动得到各自的灰云记录。'}</p>
+          </div>
+          {originDnsZone && <span className="soft-chip">origin-1 / origin-2</span>}
+        </div>
+        <form className="token-form" onSubmit={submitZone}>
+          <Field label="域名">
+            {zones.length
+              ? <select name="zone" value={zoneDraft} onChange={(event) => setZoneDraft(event.target.value)}>{zones.map((item) => <option key={item} value={item}>{item}</option>)}</select>
+              : <input name="zone" value={zoneDraft} onChange={(event) => setZoneDraft(event.target.value)} placeholder="pdfsk.com" required />}
+          </Field>
+          <button className={button({ intent: 'primary' })} type="submit" disabled={savingZone}>{savingZone ? '正在保存…' : originDnsZone ? '更新域名' : '保存并自动接入'}</button>
+        </form>
+      </section>}
       <div className="origin-page-grid">
         <section className="surface proximity-map-card">
           <div className="surface-heading"><div><span className="section-kicker">邻近感知</span><h2>源站地图</h2></div><span className="soft-chip">按经纬度显示</span></div>
@@ -717,14 +807,14 @@ function OriginsPage() {
           </div>
         </section>
         <div className="origin-detail-stack">
-          {endpoints.map((endpoint) => <section className="surface origin-detail-card" key={endpoint.id}><div className="origin-detail-heading"><span className={clsx('origin-orb', `is-${endpoint.state}`)}><span /></span><div><h2>{endpoint.name}</h2><p>{endpoint.address}</p>{endpoint.connectionHost && <p>连接 · {endpoint.connectionHost}</p>}</div><StatusBadge state={endpoint.state} label={endpoint.state === 'degraded' && !endpoint.latency ? '待检查' : undefined} /></div><div className="mini-kv"><span>区域<strong>{endpoint.region}</strong></span><span>坐标<strong>{endpoint.coordinates}</strong></span><span>权重<strong>{endpoint.weight}</strong></span><span>延迟<strong>{endpoint.state === 'healthy' ? `${endpoint.latency} ms` : endpoint.state === 'degraded' ? '待检查' : '超时'}</strong></span></div><div className="card-actions"><button className={button({ intent: 'secondary', compact: true })} type="button" onClick={() => openEdit(endpoint)}>编辑</button><button className={button({ intent: endpoint.state === 'healthy' ? 'danger' : 'secondary' })} type="button" onClick={async () => { try { await toggleEndpointHealth(endpoint.id); endpoint.state === 'healthy' ? toast.warning(`${endpoint.name} 已移出`) : toast.success(`${endpoint.name} 已恢复`) } catch (error) { toast.error(errorMessage(error)) } }}>{endpoint.state === 'healthy' ? '模拟故障' : '恢复节点'}</button><DeleteResourceButton kind="origins" id={endpoint.id} name={endpoint.name} compact /></div></section>)}
+          {endpoints.map((endpoint) => <section className="surface origin-detail-card" key={endpoint.id}><div className="origin-detail-heading"><span className={clsx('origin-orb', `is-${endpoint.state}`)}><span /></span><div><h2>{endpoint.name}</h2><p>{endpoint.address}</p>{endpoint.connectionHost && <p>接入 · {endpoint.connectionHost}</p>}</div><StatusBadge state={endpoint.state} label={endpoint.state === 'degraded' && !endpoint.latency ? '待检查' : undefined} /></div><div className="mini-kv"><span>区域<strong>{endpoint.region}</strong></span><span>坐标<strong>{endpoint.coordinates}</strong></span><span>权重<strong>{endpoint.weight}</strong></span><span>延迟<strong>{endpoint.state === 'healthy' ? `${endpoint.latency} ms` : endpoint.state === 'degraded' ? '待检查' : '超时'}</strong></span></div><div className="card-actions"><button className={button({ intent: 'secondary', compact: true })} type="button" onClick={() => openEdit(endpoint)}>编辑</button><button className={button({ intent: endpoint.state === 'healthy' ? 'danger' : 'secondary' })} type="button" onClick={async () => { try { await toggleEndpointHealth(endpoint.id); endpoint.state === 'healthy' ? toast.warning(`${endpoint.name} 已移出`) : toast.success(`${endpoint.name} 已恢复`) } catch (error) { toast.error(errorMessage(error)) } }}>{endpoint.state === 'healthy' ? '模拟故障' : '恢复节点'}</button><DeleteResourceButton kind="origins" id={endpoint.id} name={endpoint.name} compact /></div></section>)}
         </div>
       </div>
-      <Modal open={open} onOpenChange={setOpen} title={editing ? '编辑源站' : '添加源站'} description="设置 VPS 地址、Cloudflare 连接主机名、地理位置和流量权重。">
+      <Modal open={open} onOpenChange={setOpen} title={editing ? '编辑源站' : '添加源站'} description={originDnsZone ? `将自动接入 ${originDnsZone} 下的下一个 origin 前缀。` : '请先在本页设置接入域名。'}>
         <form className="form-stack" onSubmit={submit} key={editing?.id ?? 'new-origin'}>
-          <Field label="源站名称"><input name="name" required autoFocus placeholder="Singapore · VPS 3" defaultValue={editing?.name} /></Field>
-          <Field label="IP 地址或主机名"><input name="address" required placeholder="203.0.113.10 或 origin.example.com" defaultValue={editing?.address} /></Field>
-          <Field label="连接主机名（自定义 Host 时必填）"><input name="connectionHost" placeholder="origin-1.example.com" defaultValue={editing?.connectionHost ?? ''} /><small className="field-help">使用同一 Cloudflare Zone 下指向该 VPS 的专用代理 DNS；不要填写业务域名或管理域名。</small></Field>
+          <Field label="源站名称"><input name="name" required autoFocus placeholder="东京节点" defaultValue={editing?.name} /></Field>
+          <Field label="IP 地址"><input name="address" required placeholder="203.0.113.10" value={address} onChange={(event) => setAddress(event.target.value)} /></Field>
+          {previewHost && <div className="domain-provision-note"><Icon name="globe" width={18} height={18} /><div><strong>{editing?.connectionHost ? `已接入 ${previewHost}` : `将自动接入 ${previewHost}`}</strong><p>灰云 A 记录指向 {address || '该 IP'}。其他源站会继续分配 origin-2、origin-3…</p></div></div>}
           <div className="field-row">
             <Field label="区域"><input name="region" required placeholder="Asia Pacific" defaultValue={editing?.region} /></Field>
             <Field label="权重"><input name="weight" type="number" required min="0" max="100" step="1" defaultValue={editing?.weight ?? 50} /></Field>
@@ -733,7 +823,6 @@ function OriginsPage() {
             <Field label="纬度"><input name="latitude" type="number" required min="-90" max="90" step="any" placeholder="1.3521" defaultValue={editing?.coordinates.split(',')[0].trim()} /></Field>
             <Field label="经度"><input name="longitude" type="number" required min="-180" max="180" step="any" placeholder="103.8198" defaultValue={editing?.coordinates.split(',')[1].trim()} /></Field>
           </div>
-          <p className="form-hint">加入池后会自动检查该地址是否可访问。连接主机名只在用 IP 或自定义 Host 时需要，用来定向连接到这台 VPS。</p>
           <ModalActions onCancel={() => setOpen(false)} submit={editing ? '保存更改' : '添加源站'} />
         </form>
       </Modal>

@@ -125,6 +125,20 @@ export function isIpAddress(hostname: string) {
   return hostname.includes(':') || /^(?:\d{1,3}\.){3}\d{1,3}$/.test(hostname)
 }
 
+export function isPrivateOrLocalIp(hostname: string) {
+  if (hostname === '127.0.0.1' || hostname === '::1' || hostname === 'localhost') return true
+  if (/^10\.(?:\d{1,3}\.){2}\d{1,3}$/.test(hostname)) return true
+  if (/^192\.168\.(?:\d{1,3}\.)\d{1,3}$/.test(hostname)) return true
+  if (/^172\.(1[6-9]|2\d|3[0-1])\.(?:\d{1,3}\.)\d{1,3}$/.test(hostname)) return true
+  return false
+}
+
+export const ORIGIN_IP_REQUIRES_HOST = '请先设置源站接入域名。系统会为每个源站自动分配 origin-1、origin-2… 并创建灰云 A 记录。不要直连公网 IP，否则访问会变成 Cloudflare 1003。'
+
+export function originDnsLabel(index: number) {
+  return `origin-${Math.max(1, Math.trunc(index))}`
+}
+
 export function originConnectionHost(origin: Pick<SnapshotOrigin, 'address' | 'connectionHost'>) {
   if (origin.connectionHost) return origin.connectionHost
   const hostname = originHostname(origin.address)

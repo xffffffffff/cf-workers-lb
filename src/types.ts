@@ -14,6 +14,7 @@ export interface Endpoint {
   name: string
   address: string
   connectionHost?: string | null
+  connectionZone?: string | null
   region: string
   coordinates: string
   latency: number

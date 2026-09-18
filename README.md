@@ -47,7 +47,7 @@ cd cf-workers-lb && git pull --ff-only && ./install.sh --admin-host lb.example.c
 ## 首次配置顺序
 
 1. 在“设置”添加 Cloudflare API Token。
-2. 在“源站”添加 VPS，优先使用专用源站主机名。
+2. 在“源站”先设置一次接入域名（例如 `pdfsk.com`），再添加各 VPS。系统会自动分配 `origin-1`、`origin-2`… 并创建灰云 A 记录。
 3. 创建池并选择源站。默认使用内置的「源站可达性」检查：只要源站能返回任意 HTTP 响应，就视为正常，不需要准备 `/healthz`。
 4. 等待 Cron 完成一次健康检查。
 5. 创建负载平衡器。系统会自动创建或检查橙色云 DNS，并把精确主机名 Route 绑定到当前 Worker。
@@ -57,7 +57,7 @@ cd cf-workers-lb && git pull --ff-only && ./install.sh --admin-host lb.example.c
 
 源站主机名不能与负载平衡器主机名相同，否则会产生回环。WebUI 只为创建的负载平衡器生成精确主机名 Route。监视器的 `Host` 和负载平衡器的“源站 Host”都是逐项配置，不存在内置站点域名。未配置自定义 Host 的 HTTPS 源站必须具有与连接地址匹配的有效证书；实际部署更推荐 `origin.example.com` 形式的专用 DNS 名称。
 
-Cloudflare Workers 不会可靠地转发手动改写的 `Host`。因此使用自定义 Host/SNI 时，还要在对应源站填写“连接主机名”：它应是同一 Cloudflare Zone 下、开启代理且指向该 VPS 的专用 DNS 名称，例如 `origin-1.example.com`。Worker 会保留监视器或业务站点的 Host/SNI，并通过 `resolveOverride` 定向连接该源站。该字段也不包含任何预设域名。
+Cloudflare Workers 不能直连公网 IP，否则会返回 Error 1003。在 WebUI「源站」页把接入域名设置一次即可：之后每个源站都会自动获得 `origin-1`、`origin-2`… 这样的前缀，并在同一 Zone 创建 **DNS only（灰云、关闭代理）** A/AAAA 记录。不要把业务域名或管理域名当作源站连接名。Worker 会保留站点 Host/SNI，并通过 `resolveOverride` 解析这些灰云记录连到各台 VPS。
 
 ## 架构
 

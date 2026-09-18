@@ -1,9 +1,13 @@
 import {
   createId,
   integerInRange,
+  isIpAddress,
+  isPrivateOrLocalIp,
   normalizeHostname,
   normalizeOriginAddress,
   numberInRange,
+  originDnsLabel,
+  originHostname,
   parseHeaders,
   REACHABILITY_MONITOR_ID,
   REACHABILITY_MONITOR_NAME,
@@ -15,11 +19,16 @@ import { buildSnapshot, refreshActiveSnapshotHealth, validateSnapshot, writeActi
 import { probeOrigin } from '../shared/probe'
 import {
   CloudflareApiError,
+  deleteOriginDnsRecord,
   deprovisionHostname,
+  listCredentialZones,
   provisionHostname,
+  provisionOriginDns,
   removeCloudflareCredential,
   saveCloudflareCredential,
   testCloudflareCredential,
+  updateOriginDnsRecord,
+  type OriginDnsRecord,
   type ProvisionedHostname,
 } from '../shared/cloudflare'
 
@@ -180,8 +189,8 @@ function aggregateHealth(states: string[]) {
 }
 
 async function getControlState(db: D1Database) {
-  const [originsQuery, monitorsQuery, poolsQuery, poolOriginsQuery, loadBalancersQuery, loadBalancerPoolsQuery, healthQuery, logsQuery, versionQuery, analyticsQuery, trafficQuery, sampleRateQuery, credentialQuery, routesQuery] = await Promise.all([
-    db.prepare('SELECT id, name, address, connection_host, region, latitude, longitude, weight, enabled FROM origins ORDER BY created_at DESC').all<Record<string, unknown>>(),
+  const [originsQuery, monitorsQuery, poolsQuery, poolOriginsQuery, loadBalancersQuery, loadBalancerPoolsQuery, healthQuery, logsQuery, versionQuery, analyticsQuery, trafficQuery, sampleRateQuery, credentialQuery, routesQuery, originZoneQuery] = await Promise.all([
+    db.prepare('SELECT id, name, address, connection_host, connection_zone_name, region, latitude, longitude, weight, enabled FROM origins ORDER BY created_at DESC').all<Record<string, unknown>>(),
     db.prepare('SELECT m.id, m.name, m.type, m.method, m.path, m.port, m.interval_seconds, m.timeout_seconds, m.expected_codes, m.consecutive_fails, m.consecutive_successes, m.headers_json, m.follow_redirects, COUNT(p.id) AS pools FROM monitors m LEFT JOIN pools p ON p.monitor_id = m.id GROUP BY m.id ORDER BY m.created_at DESC').all<Record<string, unknown>>(),
     db.prepare('SELECT id, name, description, monitor_id, minimum_healthy, enabled FROM pools ORDER BY created_at DESC').all<Record<string, unknown>>(),
     db.prepare('SELECT pool_id, origin_id, priority, weight_override, enabled FROM pool_origins ORDER BY priority').all<Record<string, unknown>>(),
@@ -195,6 +204,7 @@ async function getControlState(db: D1Database) {
     db.prepare("SELECT value_json FROM settings WHERE key = 'request_log_sample_rate'").first<{ value_json: string }>(),
     db.prepare('SELECT token_hint, verified_at FROM cloudflare_credentials WHERE id = 1').first<{ token_hint: string; verified_at: string }>(),
     db.prepare('SELECT load_balancer_id, zone_name, route_pattern, route_created, dns_created FROM load_balancer_routes').all<Record<string, unknown>>(),
+    db.prepare("SELECT value_json FROM settings WHERE key = 'origin_dns_zone'").first<{ value_json: string }>(),
   ])
 
   const healthRows = healthQuery.results ?? []
@@ -205,7 +215,7 @@ async function getControlState(db: D1Database) {
   const origins = (originsQuery.results ?? []).map((row) => {
     const health = healthForOrigin(String(row.id))
     const latencies = health.map((item) => Number(item.last_latency_ms)).filter(Number.isFinite)
-    return { id: row.id, name: row.name, address: row.address, connectionHost: row.connection_host, region: row.region, coordinates: `${Number(row.latitude).toFixed(4)}, ${Number(row.longitude).toFixed(4)}`, latitude: row.latitude, longitude: row.longitude, latency: latencies.length ? Math.round(latencies.reduce((sum, value) => sum + value, 0) / latencies.length) : 0, weight: row.weight, enabled: Boolean(row.enabled), state: aggregateHealth(health.map((item) => String(item.state))) }
+    return { id: row.id, name: row.name, address: row.address, connectionHost: row.connection_host, connectionZone: row.connection_zone_name, region: row.region, coordinates: `${Number(row.latitude).toFixed(4)}, ${Number(row.longitude).toFixed(4)}`, latitude: row.latitude, longitude: row.longitude, latency: latencies.length ? Math.round(latencies.reduce((sum, value) => sum + value, 0) / latencies.length) : 0, weight: row.weight, enabled: Boolean(row.enabled), state: aggregateHealth(health.map((item) => String(item.state))) }
   })
 
   const pools = (poolsQuery.results ?? []).map((row) => ({ id: row.id, name: row.name, description: row.description, monitor: row.monitor_id, minimumHealthy: row.minimum_healthy, enabled: Boolean(row.enabled), origins: poolOriginRows.filter((item) => item.pool_id === row.id && item.enabled).map((item) => item.origin_id), state: aggregateHealth(healthForPool(String(row.id)).map((item) => String(item.state))) }))
@@ -234,7 +244,104 @@ async function getControlState(db: D1Database) {
   const logs = (logsQuery.results ?? []).map((row) => ({ id: String(row.id), time: String(row.occurred_at).slice(11, 19), event: row.event_type, hostname: row.hostname ?? '全部站点', origin: originNames.get(String(row.origin_id)) ?? poolNames.get(String(row.pool_id)) ?? '系统', result: row.message, duration: row.duration_ms == null ? '—' : `${row.duration_ms} ms`, level: row.level }))
 
   const traffic = (trafficQuery.results ?? []).map((row) => ({ time: String(row.bucket).slice(11, 16), requests: Math.round(Number(row.samples ?? 0) / sampleRate), ttfb: Math.round(Number(row.ttfb ?? 0)) }))
-  return { origins, monitors, pools, loadBalancers, logs, analytics: { traffic, sampleRate, failovers: loadBalancers.reduce((sum, item) => sum + Number(item.failovers ?? 0), 0) }, meta: { connected: true, publishedVersion: versionQuery?.version ?? null, publishedAt: versionQuery?.published_at ?? null, cloudflare: { configured: Boolean(credentialQuery), tokenHint: credentialQuery?.token_hint ?? null, verifiedAt: credentialQuery?.verified_at ?? null } } }
+  const originDnsZone = parseSettingText(originZoneQuery?.value_json).trim().toLowerCase()
+  return { origins, monitors, pools, loadBalancers, logs, analytics: { traffic, sampleRate, failovers: loadBalancers.reduce((sum, item) => sum + Number(item.failovers ?? 0), 0) }, meta: { connected: true, publishedVersion: versionQuery?.version ?? null, publishedAt: versionQuery?.published_at ?? null, originDnsZone: originDnsZone || null, cloudflare: { configured: Boolean(credentialQuery), tokenHint: credentialQuery?.token_hint ?? null, verifiedAt: credentialQuery?.verified_at ?? null } } }
+}
+
+function parseSettingText(value: string | null | undefined) {
+  if (!value) return ''
+  try {
+    const parsed: unknown = JSON.parse(value)
+    return typeof parsed === 'string' ? parsed : String(value)
+  } catch {
+    return value.replace(/^"|"$/g, '')
+  }
+}
+
+async function readOriginDnsZone(db: D1Database) {
+  const row = await db.prepare("SELECT value_json FROM settings WHERE key = 'origin_dns_zone'").first<{ value_json: string }>()
+  const zone = parseSettingText(row?.value_json).trim().toLowerCase()
+  return zone ? normalizeHostname(zone) : ''
+}
+
+async function writeOriginDnsZone(db: D1Database, zone: string) {
+  await db.prepare("INSERT INTO settings(key, value_json) VALUES ('origin_dns_zone', ?) ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')").bind(JSON.stringify(zone)).run()
+}
+
+async function reservedOriginHostnames(db: D1Database, env: Env, exceptOriginId?: string) {
+  const adminHosts = String(env.ADMIN_HOSTS ?? '').split(',').map((item) => item.trim().toLowerCase()).filter(Boolean)
+  const [loadBalancers, origins] = await Promise.all([
+    db.prepare('SELECT hostname FROM load_balancers').all<{ hostname: string }>(),
+    db.prepare('SELECT id, connection_host FROM origins').all<{ id: string; connection_host: string | null }>(),
+  ])
+  return [
+    ...adminHosts,
+    ...(loadBalancers.results ?? []).map((item) => item.hostname),
+    ...(origins.results ?? []).filter((item) => item.connection_host && item.id !== exceptOriginId).map((item) => String(item.connection_host)),
+  ]
+}
+
+async function nextOriginDnsLabel(db: D1Database, zoneName: string, reserved: string[], exceptOriginId?: string) {
+  const suffix = `.${zoneName}`
+  const used = new Set(reserved.map((item) => item.toLowerCase()))
+  const rows = await db.prepare('SELECT id, connection_host FROM origins WHERE connection_host IS NOT NULL').all<{ id: string; connection_host: string }>()
+  for (const row of rows.results ?? []) {
+    if (exceptOriginId && row.id === exceptOriginId) continue
+    used.add(String(row.connection_host).toLowerCase())
+  }
+  let index = 1
+  while (used.has(`${originDnsLabel(index)}${suffix}`)) index += 1
+  return originDnsLabel(index)
+}
+
+async function resolveOriginZone(body: JsonObject, env: Env) {
+  const fromBody = String(body.zone ?? '').trim()
+  const saved = await readOriginDnsZone(env.DB)
+  const zone = fromBody || saved
+  if (!zone) throw new Error('请先设置源站接入域名')
+  const normalized = normalizeHostname(zone)
+  if (!saved) await writeOriginDnsZone(env.DB, normalized)
+  return normalized
+}
+
+async function attachOriginDns(body: JsonObject, address: string, env: Env, exceptOriginId?: string): Promise<OriginDnsRecord | null> {
+  if (body.connectionHost) return null
+  const hostname = originHostname(address)
+  if (!isIpAddress(hostname) || isPrivateOrLocalIp(hostname)) return null
+  const zone = await resolveOriginZone(body, env)
+  const reserved = await reservedOriginHostnames(env.DB, env, exceptOriginId)
+  const label = await nextOriginDnsLabel(env.DB, zone, reserved, exceptOriginId)
+  return provisionOriginDns(zone, label, address, env, reserved)
+}
+
+async function provisionUnattachedOrigins(env: Env, zone: string) {
+  const rows = await env.DB.prepare('SELECT id, name, address, connection_host FROM origins ORDER BY created_at').all<Record<string, unknown>>()
+  const attached: Array<{ id: string; hostname: string }> = []
+  for (const row of rows.results ?? []) {
+    if (row.connection_host) continue
+    const address = String(row.address)
+    const hostname = originHostname(address)
+    if (!isIpAddress(hostname) || isPrivateOrLocalIp(hostname)) continue
+    const reserved = await reservedOriginHostnames(env.DB, env, String(row.id))
+    const label = await nextOriginDnsLabel(env.DB, zone, reserved, String(row.id))
+    const dns = await provisionOriginDns(zone, label, address, env, reserved)
+    await env.DB.prepare("UPDATE origins SET connection_host = ?, connection_zone_id = ?, connection_zone_name = ?, connection_dns_record_id = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?").bind(dns.hostname, dns.zoneId, dns.zoneName, dns.recordId, row.id).run()
+    attached.push({ id: String(row.id), hostname: dns.hostname })
+  }
+  return attached
+}
+
+async function saveOriginDnsZone(request: Request, env: Env) {
+  const body = await readJson(request)
+  const zone = normalizeHostname(requiredText(body.zone, '接入域名'))
+  if (env.ENVIRONMENT !== 'development') {
+    const zones = await listCredentialZones(env)
+    if (!zones.some((item) => zone === item || zone.endsWith(`.${item}`))) throw new CloudflareApiError(`Token 无权访问 ${zone} 所属的 Cloudflare Zone`, 403)
+  }
+  await writeOriginDnsZone(env.DB, zone)
+  const provisioned = await provisionUnattachedOrigins(env, zone)
+  await recordEvent(env.DB, 'CONFIG', provisioned.length ? `源站接入域名已设为 ${zone}，已为 ${provisioned.length} 个源站补齐灰云记录` : `源站接入域名已设为 ${zone}`)
+  return json({ zone, provisioned })
 }
 
 async function createOrigin(request: Request, env: Env) {
@@ -249,9 +356,16 @@ async function createOrigin(request: Request, env: Env) {
     longitude: numberInRange(body.longitude, -180, 180, '经度'),
     weight: integerInRange(body.weight ?? 50, 0, 100, '权重'),
   }
-  await env.DB.prepare('INSERT INTO origins(id, name, address, connection_host, region, latitude, longitude, weight, enabled) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)').bind(origin.id, origin.name, origin.address, origin.connectionHost, origin.region, origin.latitude, origin.longitude, origin.weight).run()
-  await recordEvent(env.DB, 'CONFIG', '源站已添加', { originId: origin.id })
-  return json({ id: origin.id }, 201)
+  const dns = await attachOriginDns(body, origin.address, env)
+  if (dns) origin.connectionHost = dns.hostname
+  try {
+    await env.DB.prepare('INSERT INTO origins(id, name, address, connection_host, connection_zone_id, connection_zone_name, connection_dns_record_id, region, latitude, longitude, weight, enabled) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)').bind(origin.id, origin.name, origin.address, origin.connectionHost, dns?.zoneId ?? null, dns?.zoneName ?? null, dns?.recordId ?? null, origin.region, origin.latitude, origin.longitude, origin.weight).run()
+  } catch (error) {
+    if (dns) await deleteOriginDnsRecord(dns.zoneId, dns.recordId, env).catch(() => undefined)
+    throw error
+  }
+  await recordEvent(env.DB, 'CONFIG', dns ? `源站已添加，已接入 ${dns.hostname}` : '源站已添加', { originId: origin.id })
+  return json({ id: origin.id, connectionHost: origin.connectionHost }, 201)
 }
 
 async function updateOrigin(id: string, request: Request, env: Env) {
@@ -259,18 +373,35 @@ async function updateOrigin(id: string, request: Request, env: Env) {
   if (!current) return json({ error: '源站不存在' }, 404)
   const body = await readJson(request)
   const next = {
-    name: body.name === undefined ? current.name : requiredText(body.name, '源站名称'),
-    address: body.address === undefined ? current.address : normalizeOriginAddress(body.address),
-    connectionHost: body.connectionHost === undefined ? current.connection_host : body.connectionHost ? normalizeHostname(body.connectionHost) : null,
-    region: body.region === undefined ? current.region : requiredText(body.region, '区域'),
-    latitude: body.latitude === undefined ? current.latitude : numberInRange(body.latitude, -90, 90, '纬度'),
-    longitude: body.longitude === undefined ? current.longitude : numberInRange(body.longitude, -180, 180, '经度'),
-    weight: body.weight === undefined ? current.weight : integerInRange(body.weight, 0, 100, '权重'),
+    name: body.name === undefined ? String(current.name) : requiredText(body.name, '源站名称'),
+    address: body.address === undefined ? String(current.address) : normalizeOriginAddress(body.address),
+    connectionHost: body.connectionHost === undefined ? (current.connection_host ? String(current.connection_host) : null) : body.connectionHost ? normalizeHostname(body.connectionHost) : null,
+    region: body.region === undefined ? String(current.region) : requiredText(body.region, '区域'),
+    latitude: body.latitude === undefined ? Number(current.latitude) : numberInRange(body.latitude, -90, 90, '纬度'),
+    longitude: body.longitude === undefined ? Number(current.longitude) : numberInRange(body.longitude, -180, 180, '经度'),
+    weight: body.weight === undefined ? Number(current.weight) : integerInRange(body.weight, 0, 100, '权重'),
     enabled: body.enabled === undefined ? current.enabled : Number(booleanValue(body.enabled, true)),
   }
-  await env.DB.prepare("UPDATE origins SET name = ?, address = ?, connection_host = ?, region = ?, latitude = ?, longitude = ?, weight = ?, enabled = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?").bind(next.name, next.address, next.connectionHost, next.region, next.latitude, next.longitude, next.weight, next.enabled, id).run()
+  let zoneId = current.connection_zone_id ? String(current.connection_zone_id) : null
+  let zoneName = current.connection_zone_name ? String(current.connection_zone_name) : null
+  let recordId = current.connection_dns_record_id ? String(current.connection_dns_record_id) : null
+  const requestedZone = String(body.zone ?? '').trim()
+  const zoneChanged = Boolean(requestedZone && (!zoneName || normalizeHostname(requestedZone) !== zoneName))
+  if (zoneChanged || !next.connectionHost) {
+    const dns = await attachOriginDns(body, next.address, env, id)
+    if (dns) {
+      if (recordId && recordId !== dns.recordId) await deleteOriginDnsRecord(zoneId ?? dns.zoneId, recordId, env).catch(() => undefined)
+      next.connectionHost = dns.hostname
+      zoneId = dns.zoneId
+      zoneName = dns.zoneName
+      recordId = dns.recordId
+    }
+  } else if (recordId && zoneId && next.address !== current.address) {
+    await updateOriginDnsRecord(zoneId, recordId, next.address, env)
+  }
+  await env.DB.prepare("UPDATE origins SET name = ?, address = ?, connection_host = ?, connection_zone_id = ?, connection_zone_name = ?, connection_dns_record_id = ?, region = ?, latitude = ?, longitude = ?, weight = ?, enabled = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE id = ?").bind(next.name, next.address, next.connectionHost, zoneId, zoneName, recordId, next.region, next.latitude, next.longitude, next.weight, next.enabled, id).run()
   await recordEvent(env.DB, 'CONFIG', '源站已更新', { originId: id })
-  return json({ ok: true })
+  return json({ ok: true, connectionHost: next.connectionHost })
 }
 
 async function createMonitor(request: Request, env: Env) {
@@ -470,6 +601,15 @@ async function listVersions(env: Env) {
   return json(result.results ?? [])
 }
 
+async function deleteOrigin(id: string, env: Env) {
+  const row = await env.DB.prepare('SELECT connection_zone_id, connection_dns_record_id FROM origins WHERE id = ?').bind(id).first<{ connection_zone_id: string | null; connection_dns_record_id: string | null }>()
+  const result = await deleteEntity('origins', id, env)
+  if (result.status === 204 && row?.connection_zone_id && row.connection_dns_record_id) {
+    await deleteOriginDnsRecord(row.connection_zone_id, row.connection_dns_record_id, env).catch(() => undefined)
+  }
+  return result
+}
+
 async function deleteEntity(table: 'origins' | 'monitors' | 'pools' | 'load_balancers', id: string, env: Env) {
   if (table === 'monitors' && id === REACHABILITY_MONITOR_ID) return json({ error: '默认的源站可达性检查不能删除', code: 'RESOURCE_PROTECTED' }, 409)
   const dependencyQueries = {
@@ -517,6 +657,8 @@ async function routeApi(request: Request, env: Env) {
     return json(await saveCloudflareCredential(body.token, env))
   }
   if (request.method === 'POST' && path === '/api/cloudflare/test') return json(await testCloudflareCredential(env))
+  if (request.method === 'GET' && path === '/api/cloudflare/zones') return json({ zones: await listCredentialZones(env) })
+  if (request.method === 'PUT' && path === '/api/origin-dns-zone') return saveOriginDnsZone(request, env)
   if (request.method === 'DELETE' && path === '/api/cloudflare/token') {
     await removeCloudflareCredential(env)
     return new Response(null, { status: 204, headers: securityHeaders })
@@ -537,6 +679,7 @@ async function routeApi(request: Request, env: Env) {
     const tables = { origins: 'origins', monitors: 'monitors', pools: 'pools', 'load-balancers': 'load_balancers' } as const
     const table = tables[parts[1] as keyof typeof tables]
     if (table === 'load_balancers') return deleteLoadBalancer(parts[2], request, env)
+    if (table === 'origins') return deleteOrigin(parts[2], env)
     if (table) return deleteEntity(table, parts[2], env)
   }
   return json({ error: 'API 路径不存在' }, 404)

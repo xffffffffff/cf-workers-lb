@@ -262,6 +262,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .pool-footer > span { color: var(--text-tertiary); font-size: 9px; }
 .pool-footer > strong { min-width: 0; flex: 1; overflow: hidden; font-size: 9px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
 
+.origin-zone-card { max-width: none; padding: 16px; margin-bottom: 12px; }
 .origin-page-grid { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(300px, .72fr); gap: 12px; }
 .proximity-map-card { padding: 16px; }
 .proximity-map { position: relative; overflow: hidden; border-radius: 13px; background: var(--surface); }

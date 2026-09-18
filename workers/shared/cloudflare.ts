@@ -159,6 +159,73 @@ export async function testCloudflareCredential(env: CloudflareControlEnv) {
   return { ok: true, zoneCount: verification.zones.length, zones: verification.zones.map((zone) => zone.name).sort() }
 }
 
+export async function listCredentialZones(env: CloudflareControlEnv) {
+  if (env.ENVIRONMENT === 'development') return ['example.com']
+  const token = await savedToken(env)
+  const zones = await listZones(token)
+  return zones.map((zone) => zone.name).sort((left, right) => left.localeCompare(right))
+}
+
+export interface OriginDnsRecord {
+  hostname: string
+  zoneId: string
+  zoneName: string
+  recordId: string
+  created: boolean
+}
+
+export async function provisionOriginDns(zoneHint: string, label: string, originAddress: string, env: CloudflareControlEnv, reservedHostnames: string[] = []): Promise<OriginDnsRecord> {
+  const target = dnsTarget(originAddress)
+  if (target.type === 'CNAME') throw new CloudflareApiError('自动接入需要源站填写 IP 地址')
+  const hint = zoneHint.trim().toLowerCase().replace(/\.$/, '')
+  if (env.ENVIRONMENT === 'development') {
+    const zoneName = hint.includes('.') ? hint.split('.').slice(-2).join('.') : 'example.com'
+    const hostname = hint === zoneName || !hint.endsWith(`.${zoneName}`) ? `${label}.${zoneName}` : hint
+    return { hostname, zoneId: 'local-zone', zoneName, recordId: `local-origin-dns-${crypto.randomUUID()}`, created: true }
+  }
+
+  const token = await savedToken(env)
+  const zone = await findZone(token, hint)
+  if (!zone) throw new CloudflareApiError(`Token 无权访问 ${hint} 所属的 Cloudflare Zone`, 403)
+  const reserved = new Set(reservedHostnames.map((item) => item.toLowerCase()))
+  reserved.add(zone.name)
+
+  const preferred = hint === zone.name || !hint.endsWith(`.${zone.name}`) ? `${label}.${zone.name}` : hint
+  const candidates = [preferred, ...Array.from({ length: 5 }, (_, index) => `${label}-${index + 2}.${zone.name}`)]
+
+  for (const hostname of candidates) {
+    if (reserved.has(hostname)) continue
+    const records = (await cloudflareRequest<DnsRecord[]>(token, `/zones/${zone.id}/dns_records?name=${encodeURIComponent(hostname)}&per_page=100`)).result
+    const existing = records.find((record) => ['A', 'AAAA', 'CNAME'].includes(record.type))
+    if (!existing) {
+      const created = (await cloudflareRequest<DnsRecord>(token, `/zones/${zone.id}/dns_records`, { method: 'POST', body: JSON.stringify({ type: target.type, name: hostname, content: target.content, ttl: 1, proxied: false }) })).result
+      return { hostname, zoneId: zone.id, zoneName: zone.name, recordId: created.id, created: true }
+    }
+    if (existing.type === target.type && existing.content.toLowerCase() === target.content) {
+      if (existing.proxied) {
+        const updated = (await cloudflareRequest<DnsRecord>(token, `/zones/${zone.id}/dns_records/${existing.id}`, { method: 'PATCH', body: JSON.stringify({ proxied: false }) })).result
+        return { hostname, zoneId: zone.id, zoneName: zone.name, recordId: updated.id, created: false }
+      }
+      return { hostname, zoneId: zone.id, zoneName: zone.name, recordId: existing.id, created: false }
+    }
+  }
+  throw new CloudflareApiError(`无法在 ${zone.name} 下创建源站灰云记录，请换一个源站名称`)
+}
+
+export async function updateOriginDnsRecord(zoneId: string, recordId: string, originAddress: string, env: CloudflareControlEnv) {
+  if (env.ENVIRONMENT === 'development') return
+  const target = dnsTarget(originAddress)
+  if (target.type === 'CNAME') throw new CloudflareApiError('自动接入需要源站填写 IP 地址')
+  const token = await savedToken(env)
+  await cloudflareRequest<DnsRecord>(token, `/zones/${zoneId}/dns_records/${recordId}`, { method: 'PATCH', body: JSON.stringify({ type: target.type, content: target.content, proxied: false }) })
+}
+
+export async function deleteOriginDnsRecord(zoneId: string, recordId: string, env: CloudflareControlEnv) {
+  if (env.ENVIRONMENT === 'development' || !zoneId || !recordId) return
+  const token = await savedToken(env)
+  await cloudflareRequest<unknown>(token, `/zones/${zoneId}/dns_records/${recordId}`, { method: 'DELETE' })
+}
+
 function dnsTarget(address: string) {
   let target = address.trim().toLowerCase()
   if (target.startsWith('[')) {

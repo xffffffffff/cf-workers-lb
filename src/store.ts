@@ -13,6 +13,7 @@ interface ControlPlaneState {
   backend: BackendState
   publishedVersion: number | null
   cloudflare: CloudflareConnection
+  originDnsZone: string | null
   endpoints: Endpoint[]
   monitors: Monitor[]
   pools: Pool[]
@@ -38,6 +39,8 @@ interface ControlPlaneState {
   testMonitor: (monitorId: string) => Promise<{ ok: boolean; latencyMs: number }>
   saveCloudflareToken: (token: string) => Promise<{ zoneCount: number }>
   testCloudflareToken: () => Promise<{ zoneCount: number; zones: string[] }>
+  listCloudflareZones: () => Promise<string[]>
+  saveOriginDnsZone: (zone: string) => Promise<{ zone: string; provisioned: Array<{ id: string; hostname: string }> }>
   removeCloudflareToken: () => Promise<void>
   deleteResource: (kind: ResourceKind, id: string) => Promise<void>
 }
@@ -52,6 +55,7 @@ function remotePayload(state: ControlState) {
     traffic: state.analytics.traffic,
     failovers: state.analytics.failovers,
     publishedVersion: state.meta.publishedVersion,
+    originDnsZone: state.meta.originDnsZone ?? null,
     cloudflare: state.meta.cloudflare,
     backend: 'connected' as const,
   }
@@ -72,6 +76,7 @@ function disconnectedState(backend: Extract<BackendState, 'unauthorized' | 'unav
     backend,
     publishedVersion: null,
     cloudflare: { configured: false, tokenHint: null, verifiedAt: null },
+    originDnsZone: null,
     endpoints: [],
     monitors: [],
     pools: [],
@@ -93,6 +98,7 @@ export const useControlPlane = create<ControlPlaneState>((set, get) => ({
   backend: 'loading',
   publishedVersion: null,
   cloudflare: { configured: false, tokenHint: null, verifiedAt: null },
+  originDnsZone: null,
   endpoints: [],
   monitors: [],
   pools: [],
@@ -134,13 +140,13 @@ export const useControlPlane = create<ControlPlaneState>((set, get) => ({
   addEndpoint: async (endpoint) => {
     requireConnection(get().backend)
     const [latitude, longitude] = endpoint.coordinates.split(',').map(Number)
-    await apiRequest('/api/origins', { method: 'POST', body: JSON.stringify({ name: endpoint.name, address: endpoint.address, connectionHost: endpoint.connectionHost, region: endpoint.region, latitude, longitude, weight: endpoint.weight }) })
+    await apiRequest('/api/origins', { method: 'POST', body: JSON.stringify({ name: endpoint.name, address: endpoint.address, connectionHost: endpoint.connectionHost || undefined, region: endpoint.region, latitude, longitude, weight: endpoint.weight }) })
     await get().refresh()
   },
   updateEndpoint: async (endpoint) => {
     requireConnection(get().backend)
     const [latitude, longitude] = endpoint.coordinates.split(',').map(Number)
-    await apiRequest(`/api/origins/${encodeURIComponent(endpoint.id)}`, { method: 'PATCH', body: JSON.stringify({ name: endpoint.name, address: endpoint.address, connectionHost: endpoint.connectionHost, region: endpoint.region, latitude, longitude, weight: endpoint.weight }) })
+    await apiRequest(`/api/origins/${encodeURIComponent(endpoint.id)}`, { method: 'PATCH', body: JSON.stringify({ name: endpoint.name, address: endpoint.address, connectionHost: endpoint.connectionHost || undefined, region: endpoint.region, latitude, longitude, weight: endpoint.weight }) })
     await get().refresh()
   },
   addMonitor: async (monitor) => {
@@ -194,6 +200,16 @@ export const useControlPlane = create<ControlPlaneState>((set, get) => ({
   testCloudflareToken: async () => {
     if (get().backend !== 'connected') throw new Error('请先连接已部署的管理控制面')
     return apiRequest<{ zoneCount: number; zones: string[] }>('/api/cloudflare/test', { method: 'POST', body: '{}' })
+  },
+  listCloudflareZones: async () => {
+    if (get().backend !== 'connected') throw new Error('请先连接已部署的管理控制面')
+    return (await apiRequest<{ zones: string[] }>('/api/cloudflare/zones')).zones
+  },
+  saveOriginDnsZone: async (zone) => {
+    requireConnection(get().backend)
+    const result = await apiRequest<{ zone: string; provisioned: Array<{ id: string; hostname: string }> }>('/api/origin-dns-zone', { method: 'PUT', body: JSON.stringify({ zone }) })
+    await get().refresh()
+    return result
   },
   removeCloudflareToken: async () => {
     if (get().backend !== 'connected') throw new Error('请先连接已部署的管理控制面')

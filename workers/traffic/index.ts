@@ -1,4 +1,5 @@
-import { ACTIVE_SNAPSHOT_KEY, type ConfigSnapshot, healthKey, originConnectionHost, type SnapshotLoadBalancer, type SnapshotOrigin, type SnapshotPool } from '../shared/model'
+import { ACTIVE_SNAPSHOT_KEY, type ConfigSnapshot, healthKey, isPrivateOrLocalIp, ORIGIN_IP_REQUIRES_HOST, originConnectionHost, originHostname, type SnapshotLoadBalancer, type SnapshotOrigin, type SnapshotPool } from '../shared/model'
+import { cloudflareErrorCode } from '../shared/probe'
 
 interface Env {
   CONFIG_KV: KVNamespace
@@ -145,7 +146,8 @@ async function affinityOrigin(request: Request, candidates: Candidate[], secret:
 function originRequest(request: Request<unknown, unknown>, origin: SnapshotOrigin, loadBalancer: SnapshotLoadBalancer): Request<unknown, IncomingRequestCfProperties> {
   const incomingUrl = new URL(request.url)
   const connectionHost = originConnectionHost(origin)
-  if (loadBalancer.originHost && !connectionHost) throw new Error('自定义源站 Host 需要为源站设置连接主机名，不能直接使用 IP')
+  if (!connectionHost && !isPrivateOrLocalIp(originHostname(origin.address))) throw new Error(ORIGIN_IP_REQUIRES_HOST)
+  if (loadBalancer.originHost && !connectionHost) throw new Error(ORIGIN_IP_REQUIRES_HOST)
   if (connectionHost) {
     const address = new URL(`https://${origin.address}`)
     incomingUrl.hostname = loadBalancer.originHost ?? loadBalancer.hostname
@@ -154,6 +156,7 @@ function originRequest(request: Request<unknown, unknown>, origin: SnapshotOrigi
     incomingUrl.host = origin.address
   }
   const headers = new Headers(request.headers)
+  headers.delete('host')
   headers.set('x-forwarded-host', new URL(request.url).host)
   headers.set('x-forwarded-proto', new URL(request.url).protocol.replace(':', ''))
   headers.set('x-worker-lb-origin-id', origin.id)
@@ -196,6 +199,11 @@ async function handleTraffic(request: Request<unknown, IncomingRequestCfProperti
   let firstError: string | undefined
   try {
     firstResponse = await fetch(originRequest(request.clone(), first.origin, loadBalancer))
+    const blocked = firstResponse ? await cloudflareErrorCode(firstResponse) : null
+    if (blocked) {
+      firstError = blocked === '1003' ? ORIGIN_IP_REQUIRES_HOST : `源站请求被 Cloudflare 拦截（${blocked}）`
+      firstResponse = null
+    }
   } catch (error) {
     firstError = error instanceof Error ? error.message : '源站连接失败'
   }
@@ -210,6 +218,8 @@ async function handleTraffic(request: Request<unknown, IncomingRequestCfProperti
     if (second) {
       try {
         const secondResponse = await fetch(originRequest(request.clone(), second.origin, loadBalancer))
+        const blocked = await cloudflareErrorCode(secondResponse)
+        if (blocked) throw new Error(blocked)
         selected = second
         response = secondResponse
         failedOver = true
@@ -222,7 +232,7 @@ async function handleTraffic(request: Request<unknown, IncomingRequestCfProperti
   const durationMs = Date.now() - started
   if (!response) {
     context.waitUntil(recordRequest(env, request, loadBalancer, first, null, durationMs, failedOver, snapshot.requestLogSampleRate, firstError))
-    return unavailable('所有源站连接失败')
+    return unavailable(firstError && firstError.includes('灰云') ? firstError : '所有源站连接失败')
   }
 
   context.waitUntil(recordRequest(env, request, loadBalancer, selected, response, durationMs, failedOver, snapshot.requestLogSampleRate, firstError))

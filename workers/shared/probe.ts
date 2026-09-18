@@ -1,11 +1,19 @@
 import { connect } from 'cloudflare:sockets'
-import { isAnyStatusExpected, isIpAddress, originConnectionHost, originHostname, type SnapshotMonitor, type SnapshotOrigin } from './model'
+import { isAnyStatusExpected, isIpAddress, isPrivateOrLocalIp, ORIGIN_IP_REQUIRES_HOST, originConnectionHost, originHostname, type SnapshotMonitor, type SnapshotOrigin } from './model'
 
 export interface ProbeResult {
   ok: boolean
   statusCode: number | null
   latencyMs: number
   error: string | null
+}
+
+export async function cloudflareErrorCode(response: Response) {
+  if (response.status < 400 || response.status >= 500) return null
+  const contentType = response.headers.get('content-type') ?? ''
+  if (!contentType.includes('text/html') && !contentType.includes('text/plain')) return null
+  const snippet = (await response.clone().text()).slice(0, 4000)
+  return snippet.match(/error code:\s*(\d{4})/i)?.[1] ?? null
 }
 
 function expectedStatus(expression: string, status: number) {
@@ -54,7 +62,7 @@ export async function probeOrigin(origin: SnapshotOrigin, monitor: SnapshotMonit
     const host = hostEntry?.[1]?.trim()
     const ipOrigin = isIpAddress(originHostname(origin.address))
     const resolveOverride = host || ipOrigin ? originConnectionHost(origin) : null
-    if (host && !resolveOverride) throw new Error('自定义 Host 需要为源站设置连接主机名，不能直接使用 IP')
+    if ((host || (ipOrigin && !isPrivateOrLocalIp(originHostname(origin.address)))) && !resolveOverride) throw new Error(ORIGIN_IP_REQUIRES_HOST)
     const originTarget = new URL(`${protocol}//${origin.address}`)
     const requestHost = host || (ipOrigin && origin.connectionHost ? origin.connectionHost : origin.address)
     const target = new URL(`${protocol}//${requestHost}${path}`)
@@ -70,6 +78,8 @@ export async function probeOrigin(origin: SnapshotOrigin, monitor: SnapshotMonit
       cf: resolveOverride ? { resolveOverride } : undefined,
     })
     const latencyMs = Date.now() - started
+    const blocked = await cloudflareErrorCode(response)
+    if (blocked) return { ok: false, statusCode: response.status, latencyMs, error: blocked === '1003' ? ORIGIN_IP_REQUIRES_HOST : `源站请求被 Cloudflare 拦截（${blocked}）` }
     return { ok: expectedStatus(monitor.expectedCodes, response.status), statusCode: response.status, latencyMs, error: expectedStatus(monitor.expectedCodes, response.status) ? null : `状态码 ${response.status} 不符合 ${monitor.expectedCodes}` }
   } catch (error) {
     return { ok: false, statusCode: null, latencyMs: Date.now() - started, error: error instanceof Error ? error.message : 'HTTP 检查失败' }

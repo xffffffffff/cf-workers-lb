@@ -26,6 +26,19 @@ assert.equal(cloudflare.zoneCount, 1)
 const cloudflareTest = await request('/api/cloudflare/test', { method: 'POST', body: '{}' })
 assert.equal(cloudflareTest.ok, true)
 
+const autoOrigin = await request('/api/origins', {
+  method: 'POST',
+  body: JSON.stringify({ name: 'Tokyo', address: '203.0.113.10', zone: 'example.com', region: 'Tokyo', latitude: 35.68, longitude: 139.69, weight: 50 }),
+}, 201)
+assert.equal(autoOrigin.connectionHost, 'origin-1.example.com')
+const autoOrigin2 = await request('/api/origins', {
+  method: 'POST',
+  body: JSON.stringify({ name: 'Singapore', address: '203.0.113.20', region: 'Singapore', latitude: 1.35, longitude: 103.82, weight: 50 }),
+}, 201)
+assert.equal(autoOrigin2.connectionHost, 'origin-2.example.com')
+await request(`/api/origins/${autoOrigin2.id}`, { method: 'DELETE' }, 204)
+await request(`/api/origins/${autoOrigin.id}`, { method: 'DELETE' }, 204)
+
 const origin = await request('/api/origins', {
   method: 'POST',
   body: JSON.stringify({ name: `Test VPS ${suffix}`, address: `origin-${suffix}.example.net`, connectionHost: `connect-${suffix}.example.net`, region: 'Test Region', latitude: 40.7, longitude: -74, weight: 50 }),

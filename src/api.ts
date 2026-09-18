@@ -28,6 +28,7 @@ export interface ControlState {
     connected: boolean
     publishedVersion: number | null
     publishedAt: string | null
+    originDnsZone?: string | null
     cloudflare: CloudflareConnection
   }
 }
