@@ -2,6 +2,13 @@ export type ViewId = 'dashboard' | 'load-balancers' | 'monitors' | 'pools' | 'or
 
 export type HealthState = 'healthy' | 'degraded' | 'unhealthy'
 
+export const REACHABILITY_MONITOR_ID = 'monitor_reachability'
+
+export function isReachabilityExpected(expected: string) {
+  const normalized = expected.replaceAll('–', '-').replaceAll('—', '-').trim().toLowerCase()
+  return normalized === '*' || normalized === 'any'
+}
+
 export interface Endpoint {
   id: string
   name: string

@@ -5,6 +5,8 @@ import {
   normalizeOriginAddress,
   numberInRange,
   parseHeaders,
+  REACHABILITY_MONITOR_ID,
+  REACHABILITY_MONITOR_NAME,
   requiredText,
   type ConfigSnapshot,
   type SteeringPolicy,
@@ -158,6 +160,13 @@ async function authorized(request: Request, env: Env) {
   return Boolean(accessJwt && await verifyAccessJwt(accessJwt, env))
 }
 
+async function ensureReachabilityMonitor(db: D1Database) {
+  const existing = await db.prepare('SELECT id FROM monitors WHERE id = ?').bind(REACHABILITY_MONITOR_ID).first<{ id: string }>()
+  if (existing) return existing.id
+  await db.prepare("INSERT OR IGNORE INTO monitors(id, name, type, method, path, port, interval_seconds, timeout_seconds, expected_codes, consecutive_fails, consecutive_successes, headers_json, follow_redirects) VALUES (?, ?, 'HTTPS', 'GET', '/', NULL, 60, 5, '*', 2, 1, '{}', 0)").bind(REACHABILITY_MONITOR_ID, REACHABILITY_MONITOR_NAME).run()
+  return REACHABILITY_MONITOR_ID
+}
+
 async function recordEvent(db: D1Database, eventType: string, message: string, values: { hostname?: string; poolId?: string; originId?: string; level?: string } = {}) {
   await db.prepare('INSERT INTO events(event_type, hostname, pool_id, origin_id, level, message) VALUES (?, ?, ?, ?, ?, ?)')
     .bind(eventType, values.hostname ?? null, values.poolId ?? null, values.originId ?? null, values.level ?? 'neutral', message).run()
@@ -271,13 +280,13 @@ async function createMonitor(request: Request, env: Env) {
   const monitor = {
     id: createId('monitor'), name: requiredText(body.name, '监视器名称'), type,
     method: requestMethod(body.method),
-    path: requiredText(body.path ?? '/healthz', '路径或端口'),
+    path: requiredText(body.path ?? '/', '路径或端口'),
     port: optionalPort(body.port),
     interval: integerInRange(body.interval ?? 60, 60, 3600, '检查间隔'),
     timeout: integerInRange(body.timeout ?? 5, 1, 30, '超时'),
-    expected: requiredText(body.expected ?? '200-299', '预期状态码'),
+    expected: requiredText(body.expected ?? '*', '预期状态码'),
     consecutiveFails: integerInRange(body.consecutiveFails ?? 2, 1, 10, '失败阈值'),
-    consecutiveSuccesses: integerInRange(body.consecutiveSuccesses ?? 2, 1, 10, '恢复阈值'),
+    consecutiveSuccesses: integerInRange(body.consecutiveSuccesses ?? 1, 1, 10, '恢复阈值'),
     headers: requestHeaders(body.headers),
     followRedirects: booleanValue(body.followRedirects, false),
   }
@@ -316,7 +325,7 @@ async function createPool(request: Request, env: Env) {
   const body = await readJson(request)
   const id = createId('pool')
   const name = requiredText(body.name, '池名称')
-  const monitorId = requiredText(body.monitor, '监视器')
+  const monitorId = String(body.monitor ?? '').trim() || await ensureReachabilityMonitor(env.DB)
   const origins = stringArray(body.origins, '源站')
   const statements = [
     env.DB.prepare('INSERT INTO pools(id, name, description, monitor_id, minimum_healthy, enabled) VALUES (?, ?, ?, ?, ?, 1)').bind(id, name, String(body.description ?? '').trim(), monitorId, integerInRange(body.minimumHealthy ?? 1, 1, origins.length, '最低健康源站数')),
@@ -462,6 +471,7 @@ async function listVersions(env: Env) {
 }
 
 async function deleteEntity(table: 'origins' | 'monitors' | 'pools' | 'load_balancers', id: string, env: Env) {
+  if (table === 'monitors' && id === REACHABILITY_MONITOR_ID) return json({ error: '默认的源站可达性检查不能删除', code: 'RESOURCE_PROTECTED' }, 409)
   const dependencyQueries = {
     origins: ['SELECT COUNT(*) AS count FROM pool_origins WHERE origin_id = ?', '该源站仍被池引用，请先从池中移除'],
     monitors: ['SELECT COUNT(*) AS count FROM pools WHERE monitor_id = ?', '该监视器仍被池引用，请先修改或删除相关池'],
@@ -498,7 +508,10 @@ async function routeApi(request: Request, env: Env) {
   if (request.method === 'GET' && path === '/api/health') return json({ ok: true, service: 'worker-lb', time: new Date().toISOString() })
   if (!await authorized(request, env)) return json({ error: '需要 Cloudflare Access 登录或有效管理令牌', code: 'UNAUTHORIZED' }, 401, { 'www-authenticate': 'Bearer realm="Worker LB"' })
 
-  if (request.method === 'GET' && path === '/api/state') return json(await getControlState(env.DB))
+  if (request.method === 'GET' && path === '/api/state') {
+    await ensureReachabilityMonitor(env.DB)
+    return json(await getControlState(env.DB))
+  }
   if (request.method === 'PUT' && path === '/api/cloudflare/token') {
     const body = await readJson(request)
     return json(await saveCloudflareCredential(body.token, env))

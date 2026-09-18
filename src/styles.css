@@ -231,6 +231,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .monitor-card, .pool-card { min-width: 0; padding: 16px; }
 .monitor-card { min-height: 250px; }
 .monitor-top, .pool-card-top, .card-actions, .pool-footer, .origin-detail-heading, .settings-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.monitor-top-status { display: flex; align-items: center; gap: 8px; }
 .monitor-icon, .pool-emblem { display: grid; width: 36px; height: 36px; place-items: center; border-radius: 11px; background: var(--accent-soft); color: var(--accent); }
 .monitor-card h2, .pool-card h2 { margin-top: 18px; font-size: 14px; }
 .monitor-card > p, .pool-card > p, .origin-detail-heading p, .settings-card p { margin: 6px 0 0; color: var(--text-tertiary); font-size: 10px; line-height: 1.5; }
@@ -327,6 +328,10 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .field-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 .field { display: flex; min-width: 0; flex-direction: column; gap: 6px; color: var(--text-secondary); font-size: 10px; font-weight: 550; }
 .field-help { color: var(--text-tertiary); font-size: 9px; font-weight: 450; line-height: 1.5; }
+.segmented { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; border-radius: 12px; background: var(--surface); padding: 4px; }
+.segmented button { min-height: 34px; border: 0; border-radius: 9px; background: transparent; color: var(--text-secondary); font-size: 10px; font-weight: 600; cursor: pointer; transition: background-color 140ms var(--ease-out), color 140ms var(--ease-out), transform 160ms var(--ease-out); }
+.segmented button.is-active { background: var(--surface-raised); color: var(--text-primary); box-shadow: var(--shadow-xs); }
+.segmented button:active { transform: scale(0.97); }
 .field input, .field select, .field textarea { width: 100%; min-height: 38px; border: 1px solid var(--border); border-radius: 10px; outline: 0; background: var(--surface); padding: 0 11px; color: var(--text-primary); font-size: 11px; font-weight: 450; transition: border-color 140ms ease, background-color 140ms ease; }
 .field textarea { min-height: 76px; resize: vertical; padding-top: 10px; }
 .field input:focus, .field select:focus, .field textarea:focus { border-color: var(--accent); background: var(--surface-raised); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent); }
@@ -353,6 +358,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 
 @media (hover: hover) and (pointer: fine) {
   .nav-item:not(.is-active):hover, .theme-switch button:not(.is-active):hover, .dialog-close:hover { background: var(--surface-hover); color: var(--text-primary); }
+  .segmented button:not(.is-active):hover { color: var(--text-primary); }
   .button-primary:hover { background: linear-gradient(180deg, #4893ff 0%, #2878f4 100%); }
   .button-secondary:hover { background: var(--surface-hover); }
   .button-ghost:hover { background: var(--surface-hover); color: var(--text-primary); }

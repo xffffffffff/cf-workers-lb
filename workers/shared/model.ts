@@ -1,6 +1,14 @@
 export type HealthState = 'healthy' | 'unhealthy' | 'unknown'
 export type SteeringPolicy = 'proximity' | 'latency' | 'random' | 'failover'
 
+export const REACHABILITY_MONITOR_ID = 'monitor_reachability'
+export const REACHABILITY_MONITOR_NAME = '源站可达性'
+
+export function isAnyStatusExpected(expression: string) {
+  const normalized = expression.replaceAll('–', '-').replaceAll('—', '-').trim().toLowerCase()
+  return normalized === '*' || normalized === 'any'
+}
+
 export interface SnapshotOrigin {
   id: string
   name: string
@@ -109,11 +117,18 @@ export function normalizeOriginAddress(value: unknown) {
   return address
 }
 
+export function originHostname(address: string) {
+  return new URL(`https://${address}`).hostname.replace(/^\[|\]$/g, '')
+}
+
+export function isIpAddress(hostname: string) {
+  return hostname.includes(':') || /^(?:\d{1,3}\.){3}\d{1,3}$/.test(hostname)
+}
+
 export function originConnectionHost(origin: Pick<SnapshotOrigin, 'address' | 'connectionHost'>) {
   if (origin.connectionHost) return origin.connectionHost
-  const hostname = new URL(`https://${origin.address}`).hostname.replace(/^\[|\]$/g, '')
-  const isIpAddress = hostname.includes(':') || /^(?:\d{1,3}\.){3}\d{1,3}$/.test(hostname)
-  return isIpAddress ? null : hostname
+  const hostname = originHostname(origin.address)
+  return isIpAddress(hostname) ? null : hostname
 }
 
 export function numberInRange(value: unknown, min: number, max: number, label: string) {

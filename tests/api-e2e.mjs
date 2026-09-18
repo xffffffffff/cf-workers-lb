@@ -31,6 +31,32 @@ const origin = await request('/api/origins', {
   body: JSON.stringify({ name: `Test VPS ${suffix}`, address: `origin-${suffix}.example.net`, connectionHost: `connect-${suffix}.example.net`, region: 'Test Region', latitude: 40.7, longitude: -74, weight: 50 }),
 }, 201)
 
+const stateWithDefault = await request('/api/state')
+const reachability = stateWithDefault.monitors.find((item) => item.id === 'monitor_reachability')
+assert.ok(reachability, '应自动提供源站可达性监视器')
+assert.equal(reachability.expected, '*')
+assert.equal(reachability.path, '/')
+
+const autoPool = await request('/api/pools', {
+  method: 'POST',
+  body: JSON.stringify({ name: `Auto Pool ${suffix}`, description: 'default reachability monitor', origins: [origin.id] }),
+}, 201)
+const stateAfterAutoPool = await request('/api/state')
+assert.equal(stateAfterAutoPool.pools.find((item) => item.id === autoPool.id).monitor, 'monitor_reachability')
+await request(`/api/pools/${autoPool.id}`, { method: 'DELETE' }, 204)
+const protectedMonitor = await request('/api/monitors/monitor_reachability', { method: 'DELETE' }, 409)
+assert.equal(protectedMonitor.code, 'RESOURCE_PROTECTED')
+
+const simpleMonitor = await request('/api/monitors', {
+  method: 'POST',
+  body: JSON.stringify({ name: `Simple Monitor ${suffix}`, type: 'HTTP' }),
+}, 201)
+const savedSimple = (await request('/api/state')).monitors.find((item) => item.id === simpleMonitor.id)
+assert.equal(savedSimple.path, '/')
+assert.equal(savedSimple.expected, '*')
+assert.equal(savedSimple.consecutiveSuccesses, 1)
+await request(`/api/monitors/${simpleMonitor.id}`, { method: 'DELETE' }, 204)
+
 const monitor = await request('/api/monitors', {
   method: 'POST',
   body: JSON.stringify({ name: `Test Monitor ${suffix}`, type: 'HTTPS', method: 'GET', path: '/healthz', port: 443, interval: 60, timeout: 3, expected: '200-299', consecutiveFails: 3, consecutiveSuccesses: 1, headers: { Host: `health-${suffix}.example.net`, 'X-Health-Check': 'worker-lb' }, followRedirects: false }),

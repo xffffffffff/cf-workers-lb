@@ -19,7 +19,7 @@ import {
 import { Toaster, toast } from 'sonner'
 import { Icon, type IconName } from './icons'
 import { useControlPlane, type ResourceKind } from './store'
-import type { Endpoint, HealthState, LoadBalancer, Monitor, Pool, ViewId } from './types'
+import { isReachabilityExpected, REACHABILITY_MONITOR_ID, type Endpoint, type HealthState, type LoadBalancer, type Monitor, type Pool, type ViewId } from './types'
 
 const button = cva('button', {
   variants: {
@@ -65,6 +65,24 @@ function formatNumber(value: number) {
 
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : '操作失败，请稍后重试'
+}
+
+function isSimpleMonitor(monitor: Monitor) {
+  const extraHeaders = Object.keys(monitor.headers).filter((key) => key.toLowerCase() !== 'host')
+  return isReachabilityExpected(monitor.expected)
+    && monitor.method === 'GET'
+    && (monitor.path === '/' || monitor.type === 'TCP')
+    && extraHeaders.length === 0
+    && !monitor.followRedirects
+    && monitor.port == null
+    && monitor.interval === 60
+    && monitor.timeout === 5
+    && monitor.consecutiveFails === 2
+    && monitor.consecutiveSuccesses === 1
+}
+
+function monitorSuccessLabel(monitor: Pick<Monitor, 'expected'>) {
+  return isReachabilityExpected(monitor.expected) ? '能访问即正常' : monitor.expected
 }
 
 export function App() {
@@ -462,6 +480,7 @@ function LoadBalancersPage() {
 function MonitorsPage() {
   const [open, setOpen] = useState(false)
   const [editing, setEditing] = useState<Monitor | null>(null)
+  const [checkMode, setCheckMode] = useState<'reachability' | 'custom'>('reachability')
   const monitors = useControlPlane((state) => state.monitors)
   const addMonitor = useControlPlane((state) => state.addMonitor)
   const updateMonitor = useControlPlane((state) => state.updateMonitor)
@@ -469,11 +488,13 @@ function MonitorsPage() {
 
   function openCreate() {
     setEditing(null)
+    setCheckMode('reachability')
     setOpen(true)
   }
 
   function openEdit(monitor: Monitor) {
     setEditing(monitor)
+    setCheckMode(isSimpleMonitor(monitor) ? 'reachability' : 'custom')
     setOpen(true)
   }
 
@@ -481,28 +502,30 @@ function MonitorsPage() {
     event.preventDefault()
     const form = new FormData(event.currentTarget)
     const name = String(form.get('name'))
+    const type = String(form.get('type')) as Monitor['type']
     let extraHeaders: unknown = {}
-    const headersJson = String(form.get('headersJson') ?? '').trim()
+    const headersJson = checkMode === 'custom' ? String(form.get('headersJson') ?? '').trim() : ''
     try { extraHeaders = headersJson ? JSON.parse(headersJson) : {} } catch { toast.error('附加请求头必须是有效的 JSON 对象'); return }
     if (!extraHeaders || typeof extraHeaders !== 'object' || Array.isArray(extraHeaders)) { toast.error('附加请求头必须是 JSON 对象'); return }
     const headers = Object.fromEntries(Object.entries(extraHeaders).map(([key, value]) => [key, String(value)]))
     for (const key of Object.keys(headers)) if (key.toLowerCase() === 'host') delete headers[key]
     const host = String(form.get('host') ?? '').trim()
     if (host) headers.Host = host
+    const reachability = checkMode === 'reachability'
     const next: Monitor = {
       id: editing?.id ?? `mon-${Date.now()}`,
       name,
-      type: String(form.get('type')) as Monitor['type'],
-      method: String(form.get('method')) as Monitor['method'],
-      path: String(form.get('path')),
-      port: String(form.get('port') ?? '').trim() ? Number(form.get('port')) : null,
-      interval: Number(form.get('interval')),
-      timeout: Number(form.get('timeout')),
-      expected: String(form.get('expected')),
-      consecutiveFails: Number(form.get('consecutiveFails')),
-      consecutiveSuccesses: Number(form.get('consecutiveSuccesses')),
+      type,
+      method: reachability ? 'GET' : String(form.get('method')) as Monitor['method'],
+      path: reachability ? (type === 'TCP' ? '443' : '/') : String(form.get('path')),
+      port: reachability ? null : (String(form.get('port') ?? '').trim() ? Number(form.get('port')) : null),
+      interval: reachability ? 60 : Number(form.get('interval')),
+      timeout: reachability ? 5 : Number(form.get('timeout')),
+      expected: reachability ? '*' : String(form.get('expected')),
+      consecutiveFails: reachability ? 2 : Number(form.get('consecutiveFails')),
+      consecutiveSuccesses: reachability ? 1 : Number(form.get('consecutiveSuccesses')),
       headers,
-      followRedirects: form.get('followRedirects') === 'on',
+      followRedirects: reachability ? false : form.get('followRedirects') === 'on',
       pools: editing?.pools ?? 0,
       state: editing?.state ?? 'healthy',
     }
@@ -519,24 +542,36 @@ function MonitorsPage() {
 
   return (
     <>
-      <PageIntro description="主动检查源站是否可用；每个监视器可独立设置 Host、请求头、端口和恢复阈值。" action={<button className={button({ intent: 'primary' })} type="button" onClick={openCreate}><Icon name="plus" width={17} height={17} />创建监视器</button>} />
+      <PageIntro description="默认只确认源站能否访问。只有需要专用健康接口或指定状态码时，才创建自定义监视器。" action={<button className={button({ intent: 'primary' })} type="button" onClick={openCreate}><Icon name="plus" width={17} height={17} />创建监视器</button>} />
       <div className="monitor-grid">
         {monitors.map((monitor) => {
           const host = Object.entries(monitor.headers).find(([key]) => key.toLowerCase() === 'host')?.[1]
-          return <section className="surface monitor-card" key={monitor.id}><div className="monitor-top"><span className="monitor-icon"><Icon name="pulse" width={19} height={19} /></span><StatusBadge state={monitor.state} /></div><h2>{monitor.name}</h2><p>{monitor.method} · {monitor.type} · {monitor.path}{monitor.port ? `:${monitor.port}` : ''}</p>{host && <p className="monitor-host">Host · {host}</p>}<div className="mini-kv"><span>间隔<strong>{monitor.interval} 秒</strong></span><span>超时<strong>{monitor.timeout} 秒</strong></span><span>期望<strong>{monitor.expected}</strong></span><span>关联池<strong>{monitor.pools}</strong></span></div><div className="card-actions"><button className={button({ intent: 'secondary', compact: true })} type="button" onClick={() => openEdit(monitor)}>编辑</button><button className={button({ intent: 'secondary', compact: true })} type="button" onClick={() => { toast.promise(testMonitor(monitor.id), { loading: '正在检查源站…', success: (result) => `${monitor.name} 检查成功 · ${result.latencyMs} ms`, error: (error) => errorMessage(error) }) }}>立即测试</button><DeleteResourceButton kind="monitors" id={monitor.id} name={monitor.name} compact /></div></section>
+          const reachability = isReachabilityExpected(monitor.expected)
+          return <section className="surface monitor-card" key={monitor.id}><div className="monitor-top"><span className="monitor-icon"><Icon name="pulse" width={19} height={19} /></span><div className="monitor-top-status">{monitor.id === REACHABILITY_MONITOR_ID && <span className="soft-chip">默认</span>}<StatusBadge state={monitor.state} /></div></div><h2>{monitor.name}</h2><p>{reachability ? `${monitor.type} · 能访问即正常` : `${monitor.method} · ${monitor.type} · ${monitor.path}${monitor.port ? `:${monitor.port}` : ''}`}</p>{host && <p className="monitor-host">Host · {host}</p>}<div className="mini-kv"><span>间隔<strong>{monitor.interval} 秒</strong></span><span>超时<strong>{monitor.timeout} 秒</strong></span><span>期望<strong>{monitorSuccessLabel(monitor)}</strong></span><span>关联池<strong>{monitor.pools}</strong></span></div><div className="card-actions"><button className={button({ intent: 'secondary', compact: true })} type="button" onClick={() => openEdit(monitor)}>编辑</button><button className={button({ intent: 'secondary', compact: true })} type="button" onClick={() => { toast.promise(testMonitor(monitor.id), { loading: '正在检查源站…', success: (result) => `${monitor.name} 检查成功 · ${result.latencyMs} ms`, error: (error) => errorMessage(error) }) }}>立即测试</button>{monitor.id !== REACHABILITY_MONITOR_ID && <DeleteResourceButton kind="monitors" id={monitor.id} name={monitor.name} compact />}</div></section>
         })}
       </div>
-      <Modal open={open} onOpenChange={setOpen} title={editing ? '编辑监视器' : '创建监视器'} description="定义主动健康检查请求和成功条件；所有请求头都按监视器独立保存。">
+      <Modal open={open} onOpenChange={setOpen} title={editing ? '编辑监视器' : '创建监视器'} description="默认只要源站能返回响应就视为正常，不必准备 /healthz。">
         <form className="form-stack" onSubmit={submit} key={editing?.id ?? 'new-monitor'}>
-          <Field label="名称"><input name="name" required placeholder="HTTPS · Web 健康检查" defaultValue={editing?.name} /></Field>
-          <div className="field-row"><Field label="协议"><select name="type" defaultValue={editing?.type ?? 'HTTPS'}><option>HTTPS</option><option>HTTP</option><option>TCP</option></select></Field><Field label="请求方法"><select name="method" defaultValue={editing?.method ?? 'GET'}><option>GET</option><option>HEAD</option></select></Field></div>
-          <div className="field-row"><Field label="路径"><input name="path" required defaultValue={editing?.path ?? '/healthz'} /></Field><Field label="端口（可选）"><input name="port" type="number" min="1" max="65535" defaultValue={editing?.port ?? ''} placeholder="HTTPS 默认 443" /></Field></div>
-          <Field label="Host 请求头（可选）"><input name="host" defaultValue={editingHost} placeholder="站点的源站虚拟主机名" /><small className="field-help">每个站点单独填写；留空不会发送自定义 Host。</small></Field>
-          <Field label="附加请求头（JSON，可选）"><textarea name="headersJson" defaultValue={Object.keys(editingExtraHeaders).length ? JSON.stringify(editingExtraHeaders, null, 2) : ''} placeholder={'{\n  "Authorization": "Bearer …"\n}'} spellCheck={false} /></Field>
-          <div className="field-row"><Field label="检查间隔"><select name="interval" defaultValue={String(editing?.interval ?? 60)}><option value="60">60 秒</option><option value="120">120 秒</option><option value="300">300 秒</option></select></Field><Field label="超时"><select name="timeout" defaultValue={String(editing?.timeout ?? 5)}><option value="3">3 秒</option><option value="5">5 秒</option><option value="10">10 秒</option></select></Field></div>
-          <Field label="预期状态码"><input name="expected" required defaultValue={editing?.expected ?? '200–299'} /></Field>
-          <div className="field-row"><Field label="连续失败阈值"><input name="consecutiveFails" type="number" min="1" max="10" defaultValue={editing?.consecutiveFails ?? 2} /></Field><Field label="连续成功阈值"><input name="consecutiveSuccesses" type="number" min="1" max="10" defaultValue={editing?.consecutiveSuccesses ?? 2} /></Field></div>
-          <label className="switch-row"><span><strong>跟随重定向</strong><small>关闭时，3xx 会直接参与状态码判断。</small></span><input type="checkbox" name="followRedirects" defaultChecked={editing?.followRedirects ?? false} /></label>
+          <Field label="名称"><input name="name" required placeholder={checkMode === 'reachability' ? '源站可达性' : 'HTTPS · Web 健康检查'} defaultValue={editing?.name} /></Field>
+          <div className="field">
+            <span>检查方式</span>
+            <div className="segmented" role="radiogroup" aria-label="检查方式">
+              <button type="button" className={checkMode === 'reachability' ? 'is-active' : ''} aria-pressed={checkMode === 'reachability'} onClick={() => setCheckMode('reachability')}>源站能访问即可</button>
+              <button type="button" className={checkMode === 'custom' ? 'is-active' : ''} aria-pressed={checkMode === 'custom'} onClick={() => setCheckMode('custom')}>指定路径和状态码</button>
+            </div>
+          </div>
+          <Field label="协议"><select name="type" defaultValue={editing?.type ?? 'HTTPS'}><option>HTTPS</option><option>HTTP</option><option>TCP</option></select></Field>
+          {checkMode === 'custom' && <div className="field-row"><Field label="请求方法"><select name="method" defaultValue={editing?.method ?? 'GET'}><option>GET</option><option>HEAD</option></select></Field><Field label="路径"><input name="path" required defaultValue={editing?.path ?? '/'} /></Field></div>}
+          {checkMode === 'custom' && <Field label="端口（可选）"><input name="port" type="number" min="1" max="65535" defaultValue={editing?.port ?? ''} placeholder="HTTPS 默认 443" /></Field>}
+          <Field label="Host 请求头（可选）"><input name="host" defaultValue={editingHost} placeholder="站点的源站虚拟主机名" /><small className="field-help">虚拟主机才需要填写；留空则直接访问源站地址。</small></Field>
+          {checkMode === 'reachability' && <p className="form-hint">会请求源站根路径。只要能连上并收到任意 HTTP 响应，就视为健康；连接失败或超时才移出。</p>}
+          {checkMode === 'custom' && <>
+            <Field label="附加请求头（JSON，可选）"><textarea name="headersJson" defaultValue={Object.keys(editingExtraHeaders).length ? JSON.stringify(editingExtraHeaders, null, 2) : ''} placeholder={'{\n  "Authorization": "Bearer …"\n}'} spellCheck={false} /></Field>
+            <div className="field-row"><Field label="检查间隔"><select name="interval" defaultValue={String(editing?.interval ?? 60)}><option value="60">60 秒</option><option value="120">120 秒</option><option value="300">300 秒</option></select></Field><Field label="超时"><select name="timeout" defaultValue={String(editing?.timeout ?? 5)}><option value="3">3 秒</option><option value="5">5 秒</option><option value="10">10 秒</option></select></Field></div>
+            <Field label="预期状态码"><input name="expected" required defaultValue={isReachabilityExpected(editing?.expected ?? '*') ? '200-299' : editing?.expected} /><small className="field-help">例如 200-299。填写 * 表示任意响应都算成功。</small></Field>
+            <div className="field-row"><Field label="连续失败阈值"><input name="consecutiveFails" type="number" min="1" max="10" defaultValue={editing?.consecutiveFails ?? 2} /></Field><Field label="连续成功阈值"><input name="consecutiveSuccesses" type="number" min="1" max="10" defaultValue={editing?.consecutiveSuccesses ?? 1} /></Field></div>
+            <label className="switch-row"><span><strong>跟随重定向</strong><small>关闭时，3xx 会直接参与状态码判断。</small></span><input type="checkbox" name="followRedirects" defaultChecked={editing?.followRedirects ?? false} /></label>
+          </>}
           <ModalActions onCancel={() => setOpen(false)} submit={editing ? '保存更改' : '创建监视器'} />
         </form>
       </Modal>
@@ -561,7 +596,7 @@ function PoolsPage() {
       toast.error('请至少选择一个源站')
       return
     }
-    const next: Pool = { id: `pool-${Date.now()}`, name, description: String(form.get('description')), monitor: String(form.get('monitor')), origins, enabled: true }
+    const next: Pool = { id: `pool-${Date.now()}`, name, description: String(form.get('description')), monitor: String(form.get('monitor') || ''), origins, enabled: true }
     try {
       await addPool(next)
       setOpen(false)
@@ -571,18 +606,20 @@ function PoolsPage() {
 
   return (
     <>
-      <PageIntro description="池将多个源站组成一个可复用的路由目标，并绑定统一的健康监视器。" action={<button className={button({ intent: 'primary' })} type="button" onClick={() => setOpen(true)}><Icon name="plus" width={17} height={17} />创建池</button>} />
+      <PageIntro description="池将多个源站组成一个可复用的路由目标。默认健康检查只需源站能访问，无需专用接口。" action={<button className={button({ intent: 'primary' })} type="button" onClick={() => setOpen(true)}><Icon name="plus" width={17} height={17} />创建池</button>} />
       <div className="pool-grid">
         {pools.map((pool) => {
           const monitor = monitors.find((item) => item.id === pool.monitor)
-          return <section className={clsx('surface pool-card', !pool.enabled && 'is-disabled')} key={pool.id}><div className="pool-card-top"><div className="pool-emblem"><Icon name="layers" width={20} height={20} /></div><label className="switch-control"><input type="checkbox" checked={pool.enabled} onChange={() => { void togglePool(pool.id).catch((error) => toast.error(errorMessage(error))) }} /><span /></label></div><h2>{pool.name}</h2><p>{pool.description}</p><div className="pool-health-row"><StatusBadge state={pool.enabled ? 'healthy' : 'unhealthy'} /><span>{pool.origins.length} 个源站</span></div><div className="pool-origin-list">{pool.origins.map((originId) => { const origin = endpoints.find((item) => item.id === originId); return origin ? <div key={origin.id}><span className={clsx('status-dot', `is-${origin.state}`)} /><span><strong>{origin.name}</strong><small>{origin.address}</small></span><b>{origin.state === 'healthy' ? `${origin.latency} ms` : '超时'}</b></div> : null })}</div><div className="pool-footer"><span>监视器</span><strong>{monitor?.name ?? '未设置'}</strong><DeleteResourceButton kind="pools" id={pool.id} name={pool.name} compact /></div></section>
+          return <section className={clsx('surface pool-card', !pool.enabled && 'is-disabled')} key={pool.id}><div className="pool-card-top"><div className="pool-emblem"><Icon name="layers" width={20} height={20} /></div><label className="switch-control"><input type="checkbox" checked={pool.enabled} onChange={() => { void togglePool(pool.id).catch((error) => toast.error(errorMessage(error))) }} /><span /></label></div><h2>{pool.name}</h2><p>{pool.description}</p><div className="pool-health-row"><StatusBadge state={pool.enabled ? 'healthy' : 'unhealthy'} /><span>{pool.origins.length} 个源站</span></div><div className="pool-origin-list">{pool.origins.map((originId) => { const origin = endpoints.find((item) => item.id === originId); return origin ? <div key={origin.id}><span className={clsx('status-dot', `is-${origin.state}`)} /><span><strong>{origin.name}</strong><small>{origin.address}</small></span><b>{origin.state === 'healthy' ? `${origin.latency} ms` : '超时'}</b></div> : null })}</div><div className="pool-footer"><span>健康检查</span><strong>{monitor ? (isReachabilityExpected(monitor.expected) ? '能访问即正常' : monitor.name) : '未设置'}</strong><DeleteResourceButton kind="pools" id={pool.id} name={pool.name} compact /></div></section>
         })}
       </div>
-      <Modal open={open} onOpenChange={setOpen} title="创建池" description="选择监视器和该池可以使用的 VPS 源站。">
+      <Modal open={open} onOpenChange={setOpen} title="创建池" description="选择该池可以使用的 VPS 源站。健康检查默认只要能访问就视为正常。">
         <form className="form-stack" onSubmit={submit}>
           <Field label="池名称"><input name="name" required placeholder="生产主池" /></Field>
           <Field label="说明"><textarea name="description" required placeholder="该池承载哪些站点和流量" rows={3} /></Field>
-          <Field label="监视器"><select name="monitor" defaultValue={monitors[0]?.id}>{monitors.map((monitor) => <option key={monitor.id} value={monitor.id}>{monitor.name}</option>)}</select></Field>
+          {monitors.some((item) => item.id !== REACHABILITY_MONITOR_ID)
+            ? <Field label="健康检查"><select name="monitor" defaultValue={monitors.find((item) => item.id === REACHABILITY_MONITOR_ID)?.id ?? monitors[0]?.id}>{monitors.map((monitor) => <option key={monitor.id} value={monitor.id}>{isReachabilityExpected(monitor.expected) ? `${monitor.name} · 能访问即正常` : `${monitor.name} · ${monitor.method} ${monitor.path}`}</option>)}</select><small className="field-help">默认不需要 /healthz；只有要按状态码判断时才换自定义监视器。</small></Field>
+            : <p className="form-hint">健康检查使用默认规则：源站能访问即视为正常，无需 /healthz。</p>}
           <fieldset className="origin-picker">
             <legend>源站</legend>
             {endpoints.map((endpoint) => <label className="origin-check" key={endpoint.id}><input type="checkbox" name="origins" value={endpoint.id} defaultChecked /><span className={clsx('status-dot', `is-${endpoint.state}`)} /><span><strong>{endpoint.name}</strong><small>{endpoint.address} · 权重 {endpoint.weight}</small></span></label>)}
@@ -655,7 +692,7 @@ function OriginsPage() {
 
   return (
     <>
-      <PageIntro description="源站坐标用于邻近感知；连接主机名用于在不改变站点 Host/SNI 的前提下定向连接 VPS。" action={<button className={button({ intent: 'primary' })} type="button" onClick={openCreate}><Icon name="plus" width={17} height={17} />添加源站</button>} />
+      <PageIntro description="添加 VPS 后即可加入池。默认健康检查只确认该地址能否访问，不必准备 /healthz。" action={<button className={button({ intent: 'primary' })} type="button" onClick={openCreate}><Icon name="plus" width={17} height={17} />添加源站</button>} />
       <div className="origin-page-grid">
         <section className="surface proximity-map-card">
           <div className="surface-heading"><div><span className="section-kicker">邻近感知</span><h2>源站地图</h2></div><span className="soft-chip">15% 距离缓冲</span></div>
@@ -688,7 +725,7 @@ function OriginsPage() {
             <Field label="纬度"><input name="latitude" type="number" required min="-90" max="90" step="any" placeholder="1.3521" defaultValue={editing?.coordinates.split(',')[0].trim()} /></Field>
             <Field label="经度"><input name="longitude" type="number" required min="-180" max="180" step="any" placeholder="103.8198" defaultValue={editing?.coordinates.split(',')[1].trim()} /></Field>
           </div>
-          <p className="form-hint">连接主机名只决定 Worker 实际连接哪台 VPS；监视器中的 Host 决定健康检查的虚拟主机。</p>
+          <p className="form-hint">加入池后会自动检查该地址是否可访问。连接主机名只在用 IP 或自定义 Host 时需要，用来定向连接到这台 VPS。</p>
           <ModalActions onCancel={() => setOpen(false)} submit={editing ? '保存更改' : '添加源站'} />
         </form>
       </Modal>

@@ -1,5 +1,5 @@
 import { connect } from 'cloudflare:sockets'
-import { originConnectionHost, type SnapshotMonitor, type SnapshotOrigin } from './model'
+import { isAnyStatusExpected, isIpAddress, originConnectionHost, originHostname, type SnapshotMonitor, type SnapshotOrigin } from './model'
 
 export interface ProbeResult {
   ok: boolean
@@ -9,6 +9,7 @@ export interface ProbeResult {
 }
 
 function expectedStatus(expression: string, status: number) {
+  if (isAnyStatusExpected(expression)) return true
   const normalized = expression.replaceAll('–', '-').replaceAll('—', '-').trim()
   return normalized.split(',').some((part) => {
     const [start, end] = part.trim().split('-').map(Number)
@@ -51,12 +52,14 @@ export async function probeOrigin(origin: SnapshotOrigin, monitor: SnapshotMonit
     const path = monitor.path.startsWith('/') ? monitor.path : `/${monitor.path}`
     const hostEntry = Object.entries(monitor.headers).find(([name]) => name.toLowerCase() === 'host')
     const host = hostEntry?.[1]?.trim()
-    const resolveOverride = host ? originConnectionHost(origin) : null
+    const ipOrigin = isIpAddress(originHostname(origin.address))
+    const resolveOverride = host || ipOrigin ? originConnectionHost(origin) : null
     if (host && !resolveOverride) throw new Error('自定义 Host 需要为源站设置连接主机名，不能直接使用 IP')
     const originTarget = new URL(`${protocol}//${origin.address}`)
-    const target = new URL(`${protocol}//${host || origin.address}${path}`)
+    const requestHost = host || (ipOrigin && origin.connectionHost ? origin.connectionHost : origin.address)
+    const target = new URL(`${protocol}//${requestHost}${path}`)
     if (monitor.port !== null) target.port = String(monitor.port)
-    else if (host && originTarget.port) target.port = originTarget.port
+    else if ((host || (ipOrigin && origin.connectionHost)) && originTarget.port) target.port = originTarget.port
     const headers = new Headers({ 'User-Agent': 'Worker-LB-Health/1.0', ...monitor.headers })
     if (hostEntry) headers.delete(hostEntry[0])
     const response = await fetch(target, {
